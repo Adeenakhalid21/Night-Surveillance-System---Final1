@@ -194,7 +194,7 @@
                             Avg: {{ "%.1f"|format(detection.avg_confidence * 100) }}%
                         </div>
                         <div class="confidence-bar">
-                            <div class="confidence-fill" style="width: {{ (detection.avg_confidence * 100)|round }}%"></div>
+                            <div class="confidence-fill" data-confidence="{{ (detection.avg_confidence * 100)|round }}" style="width:0%;"></div>
                         </div>
                     </div>
                 </div>
@@ -243,5 +243,12 @@
             </div>
         </div>
     </div>
+    <script>
+    // Apply dynamic widths after DOM loads (avoids template syntax confusing CSS parser)
+    document.querySelectorAll('.confidence-fill[data-confidence]').forEach(function(el){
+        var v = parseFloat(el.getAttribute('data-confidence'));
+        if(!isNaN(v)) { el.style.width = v + '%'; }
+    });
+    </script>
 </body>
 </html>
