@@ -68,6 +68,7 @@ def detect_objects_and_classify(frame, camera_id=1):
             
             # Save the detected frame as an image with timestamp
             timestamp = time.strftime("%Y%m%d_%H%M%S")
+            os.makedirs('static/images', exist_ok=True)
             detection_image_path = f'static/images/detection_{timestamp}_{class_name}.jpg'
             cv2.imwrite(detection_image_path, frame)
             
@@ -95,6 +96,7 @@ def detect_objects_and_classify(frame, camera_id=1):
 
             # Keep the original detected frame for email
             att = 'static/images/detected_frame.jpg'
+            os.makedirs('static/images', exist_ok=True)
             cv2.imwrite(att, frame)
 
             # Send email alert in a separate thread
@@ -444,9 +446,33 @@ def login():
                 session['firstname'] = user['firstname']
                 session['email'] = user['email']
                 mesage = 'Logged in successfully!'
+                # Log auth success to surveillance_events for audit visibility
+                try:
+                    log_surveillance_event_db({
+                        'camera_id': None,
+                        'event_type': 'login_success',
+                        'severity': 'low',
+                        'description': f"Login success for {user['email']}",
+                        'image_path': None,
+                        'video_path': None
+                    })
+                except Exception:
+                    pass
                 return render_template('dashboard.html', mesage=mesage)
             else:
                 mesage = 'Invalid credentials. Use your email or first name with the correct password.'
+                # Log auth failure to surveillance_events
+                try:
+                    log_surveillance_event_db({
+                        'camera_id': None,
+                        'event_type': 'login_failed',
+                        'severity': 'low',
+                        'description': f"Login failed for identifier '{identifier}'",
+                        'image_path': None,
+                        'video_path': None
+                    })
+                except Exception:
+                    pass
         finally:
             conn.close()
     return render_template('home.html', mesage=mesage)
@@ -668,6 +694,22 @@ def surveillance_events():
     conn.close()
     
     return render_template('surveillance_events.html', events=events)
+
+@app.route('/auth_logs')
+def auth_logs():
+    """Display authentication logs (login successes and failures)."""
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
+    conn = get_db_connection()
+    rows = conn.execute('''
+        SELECT * FROM surveillance_events 
+        WHERE event_type IN ('login_success','login_failed')
+        ORDER BY timestamp DESC
+        LIMIT 200
+    ''').fetchall()
+    conn.close()
+    # Reuse surveillance_events template for simplicity
+    return render_template('surveillance_events.html', events=rows)
 
 @app.route('/dataset_analytics')
 def dataset_analytics():

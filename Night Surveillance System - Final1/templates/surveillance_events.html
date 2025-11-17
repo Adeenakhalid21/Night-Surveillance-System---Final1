@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Surveillance Events - Night Surveillance System</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css') }}">
+  <style>
+    .container { max-width: 1100px; margin: 20px auto; padding: 20px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .events { background: #fff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    .row { padding: 12px 16px; border-bottom: 1px solid #eee; display: grid; grid-template-columns: 160px 180px 1fr 140px; gap: 12px; align-items: center; }
+    .row.header { font-weight: 600; background: #f7f7f9; }
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 0.85em; }
+    .badge.low { background: #e7f5ff; color: #1c7ed6; }
+    .badge.medium { background: #fff3bf; color: #d9480f; }
+    .badge.high { background: #ffe3e3; color: #c92a2a; }
+    .muted { color: #666; font-size: 0.95em; }
+    .actions { margin-top: 16px; }
+    .btn { padding: 8px 14px; border: none; border-radius: 4px; background: #007bff; color: #fff; text-decoration: none; cursor: pointer; }
+    .btn + .btn { margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📋 Surveillance Events</h1>
+      <div class="actions">
+        <a class="btn" href="{{ url_for('dashboard') }}">🏠 Dashboard</a>
+        <a class="btn" href="{{ url_for('datasets') }}">📦 Datasets</a>
+      </div>
+    </div>
+
+    <div class="events">
+      <div class="row header">
+        <div>Timestamp</div>
+        <div>Type</div>
+        <div>Description</div>
+        <div>Severity</div>
+      </div>
+      {% if events %}
+        {% for e in events %}
+        <div class="row">
+          <div class="muted">{{ e.timestamp }}</div>
+          <div>{{ e.event_type }}</div>
+          <div>
+            {% if e.camname %}
+              <span class="muted">[{{ e.camname }}]</span>
+            {% endif %}
+            {{ e.description or '' }}
+          </div>
+          <div>
+            <span class="badge {{ (e.severity or 'medium')|lower }}">{{ e.severity or 'medium' }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="row"><div class="muted" style="grid-column: 1 / -1;">No events yet.</div></div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
