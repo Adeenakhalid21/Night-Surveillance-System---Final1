@@ -155,6 +155,114 @@ def import_visdrone_dataset(source_path: str, dataset_name: str = 'VisDrone Data
     return True
 
 
+def import_generic_images_dataset(source_path: str, dataset_name: str = 'Generic Images Dataset') -> bool:
+    """Import a generic folder of images (no annotations).
+    Copies recursively into datasets/<safe_name> and registers as 'detection'.
+    """
+    if not os.path.isdir(source_path):
+        print(f"❌ Path not found: {source_path}")
+        return False
+    # Derive a safe folder name from dataset_name (lowercase, underscores)
+    safe = ''.join(ch if ch.isalnum() else '_' for ch in dataset_name.lower()).strip('_')
+    target_dir = f'datasets/{safe or "generic_images"}'
+    os.makedirs(target_dir, exist_ok=True)
+    samples: List[Dict[str, Optional[str]]] = []
+    copied = 0
+    for root, _, files in os.walk(source_path):
+        rel = os.path.relpath(root, source_path)
+        if rel == '.':
+            rel = ''
+        dest_dir = os.path.join(target_dir, rel)
+        os.makedirs(dest_dir, exist_ok=True)
+        for f in files:
+            if f.lower().endswith(IMAGE_EXTS):
+                src = os.path.join(root, f)
+                dst = os.path.join(dest_dir, f)
+                shutil.copy2(src, dst)
+                copied += 1
+                samples.append({'image_path': dst, 'annotation_path': None, 'label': 'generic', 'category': 'generic'})
+                if copied % 200 == 0:
+                    print(f"📋 Copied {copied} images...")
+    print(f"✅ Copied {copied} images total")
+    conn = get_db_connection()
+    dataset_id = _insert_dataset(conn, dataset_name, 'detection',
+                                 'Generic images dataset (no annotations)',
+                                 len(samples), target_dir)
+    _bulk_insert_samples(conn, dataset_id, samples)
+    conn.commit(); conn.close()
+    print('🎉 Generic images import complete!')
+    return True
+
+
+def register_generic_images_dataset(source_path: str, dataset_name: str = 'Generic Images (Register Only)') -> bool:
+    """Register a generic folder of images without copying files.
+    Stores original absolute paths in training_data and points dataset.file_path to source_path.
+    """
+    if not os.path.isdir(source_path):
+        print(f"❌ Path not found: {source_path}")
+        return False
+    abs_source = os.path.abspath(source_path)
+    samples: List[Dict[str, Optional[str]]] = []
+    total = 0
+    for root, _, files in os.walk(abs_source):
+        for f in files:
+            if f.lower().endswith(IMAGE_EXTS):
+                img = os.path.join(root, f)
+                samples.append({'image_path': img, 'annotation_path': None, 'label': 'generic', 'category': 'generic'})
+                total += 1
+                if total % 2000 == 0:
+                    print(f"📝 Indexed {total} images...")
+    print(f"✅ Indexed {total} images (no copy)")
+    conn = get_db_connection()
+    dataset_id = _insert_dataset(conn, dataset_name, 'detection',
+                                 'Generic images dataset (registered paths, no copy)',
+                                 len(samples), abs_source)
+    _bulk_insert_samples(conn, dataset_id, samples)
+    conn.commit(); conn.close()
+    print('🎉 Generic register-only import complete!')
+    return True
+
+
+def import_generic_images_dataset_sample(source_path: str, dataset_name: str = 'Generic Images Sample', sample_size: int = 2000) -> bool:
+    """Copy only a sample of images into datasets/<safe_name>_sample<sample_size>."""
+    if not os.path.isdir(source_path):
+        print(f"❌ Path not found: {source_path}")
+        return False
+    safe = ''.join(ch if ch.isalnum() else '_' for ch in dataset_name.lower()).strip('_')
+    target_dir = f'datasets/{safe or "generic_images"}_sample{sample_size}'
+    os.makedirs(target_dir, exist_ok=True)
+    samples: List[Dict[str, Optional[str]]] = []
+    copied = 0
+    for root, _, files in os.walk(source_path):
+        rel = os.path.relpath(root, source_path)
+        if rel == '.':
+            rel = ''
+        dest_dir = os.path.join(target_dir, rel)
+        os.makedirs(dest_dir, exist_ok=True)
+        for f in files:
+            if f.lower().endswith(IMAGE_EXTS):
+                src = os.path.join(root, f)
+                dst = os.path.join(dest_dir, f)
+                shutil.copy2(src, dst)
+                copied += 1
+                samples.append({'image_path': dst, 'annotation_path': None, 'label': 'generic', 'category': 'generic'})
+                if copied % 200 == 0:
+                    print(f"📋 Copied {copied}/{sample_size} images...")
+                if copied >= sample_size:
+                    break
+        if copied >= sample_size:
+            break
+    print(f"✅ Copied {copied} images total (sample)")
+    conn = get_db_connection()
+    dataset_id = _insert_dataset(conn, dataset_name, 'detection',
+                                 f'Generic images sample ({sample_size})',
+                                 len(samples), target_dir)
+    _bulk_insert_samples(conn, dataset_id, samples)
+    conn.commit(); conn.close()
+    print('🎉 Generic sample import complete!')
+    return True
+
+
 def list_datasets() -> None:
     conn = get_db_connection()
     rows = conn.execute('SELECT dataset_id, dataset_name, dataset_type, total_samples, file_path FROM datasets ORDER BY created_date DESC').fetchall()
@@ -169,10 +277,16 @@ def main() -> None:
     if len(sys.argv) < 2:
         print('Usage: python import_lol_dataset.py <source_path> [dataset_name]')
         print('       python import_lol_dataset.py visdrone <source_path> [dataset_name]')
+        print('       python import_lol_dataset.py generic <source_path> [dataset_name]')
+        print('       python import_lol_dataset.py generic-register <source_path> [dataset_name]')
+        print('       python import_lol_dataset.py generic-sample <source_path> [dataset_name] [sample_size]')
         list_datasets()
         return
     args = sys.argv[1:]
     visdrone_mode = args[0].lower() == 'visdrone'
+    generic_mode = args[0].lower() == 'generic'
+    generic_register_mode = args[0].lower() == 'generic-register'
+    generic_sample_mode = args[0].lower() == 'generic-sample'
     if visdrone_mode:
         if len(args) < 2:
             print('Specify VisDrone source path')
@@ -180,6 +294,28 @@ def main() -> None:
         source = args[1]
         name = args[2] if len(args) > 2 else 'VisDrone Dataset'
         import_visdrone_dataset(source, name)
+    elif generic_mode:
+        if len(args) < 2:
+            print('Specify generic images source path')
+            return
+        source = args[1]
+        name = args[2] if len(args) > 2 else 'Generic Images Dataset'
+        import_generic_images_dataset(source, name)
+    elif generic_register_mode:
+        if len(args) < 2:
+            print('Specify generic images source path')
+            return
+        source = args[1]
+        name = args[2] if len(args) > 2 else 'Generic Images (Register Only)'
+        register_generic_images_dataset(source, name)
+    elif generic_sample_mode:
+        if len(args) < 2:
+            print('Specify generic images source path')
+            return
+        source = args[1]
+        name = args[2] if len(args) > 2 else 'Generic Images Sample'
+        sample_size = int(args[3]) if len(args) > 3 else 2000
+        import_generic_images_dataset_sample(source, name, sample_size)
     else:
         source = args[0]
         name = args[1] if len(args) > 1 else 'LOL Dataset'
