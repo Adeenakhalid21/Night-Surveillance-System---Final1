@@ -17,7 +17,10 @@ import time
 load_dotenv()
 
 # Initialize YOLOv8 model
-model = YOLO("yolov8n.pt") # yolov8n, yolov8m, yolov8l, yolov8x
+weights_path = os.getenv("YOLO_WEIGHTS", "runs/detect/coco_sample_pseudo/weights/best.pt")
+if not os.path.exists(weights_path):
+    weights_path = "yolov8n.pt"
+model = YOLO(weights_path) # yolov8n, yolov8m, yolov8l, yolov8x
 
 # Global variables for motion detection
 prev_frame = None
