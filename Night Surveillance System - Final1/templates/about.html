@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About Us</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/about-style.css')}}">
+</head>
+<body>
+
+<!--navbar -->
+    <nav class="nav">
+        <div class="nav-shield">
+            <p>NIGHT SHIELD </p>
+        </div>
+        <div class="nav-menu" id="navMenu">
+            <ul>
+                <li><a href="/" class="link">Home</a></li>
+                <li><a href="/services" class="link">Services</a></li>
+                <li><a href="/about" class="link active">About</a></li>
+                <li><a href="/contact" class="link">Contact</a></li>
+            </ul>
+        </div>
+        <div class="nav-menu-btn">
+            <i class="bx bx-menu" onclick="myMenuFunction()"></i>
+        </div>
+    </nav>
+<!-- end of navbar -->
+
+    <div class="about-section">
+        <div class="inner-container">
+            <h1>    About Us</h1>
+            <p class="text">Night Shield is a leading provider of intelligent surveillance solutions designed for nocturnal monitoring. Our team is dedicated to ensuring the safety and security of our clients through cutting-edge technology.</p>
+            <p class="text">For more information about our company, please contact us or visit our headquarters.</p>
+    <p class="text">Thank you for choosing Night Shield. We look forward to working with you!</p>
+    <div class="skills">
+        <span>Object Detection</span>
+        <span>Object Classification</span>
+        <span>Motion Detection</span>
+    </div>
+        </div>
+    </div>
+    
+
+
+
+<!-- Footer -->
+<footer>
+    <p>&copy; 2024 Night Shield. All rights reserved.</p>
+</footer>
+
+<!-- Link your JavaScript file -->
+<script src="{{ url_for('static', filename='js/home-script.js')}}"></script>
+
+</body>
+</html>

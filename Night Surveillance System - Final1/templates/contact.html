@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contact Us Page</title>
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" >
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='css/contact-style.css')}}">
+</head>
+<body>
+
+<!--navbar -->
+    <!-- <div class="wrapper"> -->
+        <nav class="nav">
+            <div class="nav-shield">
+                <p>NIGHT SHIELD </p>
+            </div>
+            <div class="nav-menu" id="navMenu">
+                <ul>
+                    <li><a href="/" class="link">Home</a></li>
+                    <li><a href="/services" class="link">Services</a></li>
+                    <li><a href="/about" class="link">About</a></li>
+                    <li><a href="/contact" class="link active">Contact</a></li>
+                </ul>
+            </div>
+            <div class="nav-menu-btn">
+                <i class="bx bx-menu" onclick="myMenuFunction()"></i>
+            </div>
+        </nav>
+    <!-- </div> -->
+    <!-- end of navbar -->
+
+    <section class="contact">
+        <div class="container">
+    <h2>Contact Us</h2>
+<div class="contact-wrapper">
+    <div class="contact-form">
+        <h3>Send us a message</h3>
+        <form>
+            <div class="form-group">
+            <input type="text" name="name" placeholder="Your Name">
+        </div>    
+        <div class="form-group">
+            <input type="email" name="email" placeholder="Your Email">
+        </div>
+        <div class="form-group">
+            <textarea name="message" placeholder="Your Message"></textarea>
+            </div>
+            <button type="submit">Send Message</button>
+        </form>
+           </div>
+        <div class="contact-info">
+        <h3>Contact Information</h3> 
+        <p><i class="bx bx-phone"></i> 1234567890</p> 
+        <p><i class="bx bx-envelope"></i> abc@example.com</p>
+        <p><i class="bx bx-map"></i>street,city,country</p>
+    </div>
+</div>
+</div>
+</section>
+           
+
+    <!-- Footer -->
+    <footer>
+        <p>&copy; 2024 Night Shield. All rights reserved.</p>
+    </footer>
+
+    <!-- Link your JavaScript file -->
+<script src="{{ url_for('static', filename='js/home-script.js')}}"></script>
+
+</body>
+</html>

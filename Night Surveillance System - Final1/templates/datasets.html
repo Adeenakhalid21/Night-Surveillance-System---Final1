@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Datasets - Night Surveillance System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css') }}">
+    <style>
+        .dataset-container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        
+        .dataset-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .dataset-card {
+            background: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-left: 4px solid #007bff;
+            transition: transform 0.3s ease;
+        }
+        
+        .dataset-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .dataset-type {
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            margin-bottom: 10px;
+        }
+        
+        .dataset-type.detection { background: #28a745; }
+        .dataset-type.classification { background: #17a2b8; }
+        .dataset-type.enhancement { background: #6f42c1; }
+        .dataset-type.events { background: #ffc107; color: #212529; }
+        .dataset-type.tracking { background: #6f42c1; }
+        
+        .dataset-stats {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-number {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .action-buttons {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.9em;
+            transition: background-color 0.3s;
+        }
+        
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover { background: #0056b3; }
+        
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover { background: #1e7e34; }
+        
+        .header-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #eee;
+        }
+        
+        .page-title {
+            font-size: 2.5em;
+            color: #333;
+            margin: 0;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        
+        .empty-state h3 {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="dataset-container">
+        <div class="header-section">
+            <h1 class="page-title">Dataset Management</h1>
+            <div>
+                <a href="{{ url_for('add_dataset') }}" class="btn btn-success">+ Add New Dataset</a>
+                <a href="{{ url_for('dataset_analytics') }}" class="btn btn-primary">📊 Analytics</a>
+                <a href="{{ url_for('surveillance_events') }}" class="btn btn-primary">🔍 Events</a>
+                <a href="{{ url_for('dashboard') }}" class="btn btn-primary">← Back to Dashboard</a>
+            </div>
+        </div>
+        
+        {% if datasets %}
+            <div class="dataset-grid">
+                {% for dataset in datasets %}
+                <div class="dataset-card">
+                    <span class="dataset-type {{ dataset.dataset_type }}">{{ dataset.dataset_type|title }}</span>
+                    <h3>{{ dataset.dataset_name }}</h3>
+                    <p>{{ dataset.description or 'No description available' }}</p>
+                    
+                    <div class="dataset-stats">
+                        <div class="stat-item">
+                            <div class="stat-number">{{ dataset.total_samples }}</div>
+                            <div class="stat-label">Samples</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-number">{{ 'Active' if dataset.is_active else 'Inactive' }}</div>
+                            <div class="stat-label">Status</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-number">{{ dataset.created_date.split('T')[0] if dataset.created_date else 'N/A' }}</div>
+                            <div class="stat-label">Created</div>
+                        </div>
+                    </div>
+                    
+                    <div class="action-buttons">
+                        <a href="{{ url_for('dataset_details', dataset_id=dataset.dataset_id) }}" class="btn btn-primary">View Details</a>
+                        {% if dataset.file_path %}
+                            <span class="btn" style="background: #6c757d; color: white;">📁 {{ dataset.file_path }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="empty-state">
+                <h3>No Datasets Found</h3>
+                <p>Start by creating your first dataset to organize your surveillance data.</p>
+                <a href="{{ url_for('add_dataset') }}" class="btn btn-success">Create First Dataset</a>
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>

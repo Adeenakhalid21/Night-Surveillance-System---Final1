@@ -1,0 +1,252 @@
+/* POPPINS FONT */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+
+*{  
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Poppins', sans-serif;
+}
+body {
+    min-height: 100vh;
+    background-image: url('../images/1.jpg');
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+    padding: 100px;
+    text-align: center;
+    color: #fff;
+    position: relative;
+    
+}
+
+
+/* Add a semi-transparent black overlay */
+body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5); /* Semi-transparent black overlay */
+    backdrop-filter: blur(4px); /* Apply a blur effect to the background */
+    z-index: -1; /* Place the overlay behind all content */
+}
+
+
+.contact {
+    min-height: 100vh;
+    
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+    padding: 10px;
+    text-align: center;
+    color: #fff;
+    position: relative;
+    
+    /* Apply a blur effect to the background */
+    position: relative; /* Ensure the z-index works */
+    overflow: hidden; /* Prevent blur from affecting content */
+    z-index: 0; /* Set a lower z-index to position the background behind other content */
+
+  
+}
+.contact::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 70%;
+    background: rgba(255, 255, 255, 0.4); /* Semi-transparent overlay for better contrast */
+    backdrop-filter: blur(7px); /* Adjust the blur intensity as needed */
+    z-index: -1; /* Position the blur layer behind other content */
+}
+
+.container{
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.container h2{
+    font-size: 36px;
+    margin-bottom: 40px;
+    color: #fff;
+}
+.contact-wrapper{
+
+    display: grid;
+    grid-template-columns: repeat(2,1fr);
+    grid-gap: 50px;
+    
+    
+}
+.contact-form h3{
+    font-size: 24px;
+    margin-bottom: 20px;
+    color:#fff;
+    
+}
+.form-group{
+    margin-bottom: 20px;
+    
+
+}
+input, textarea{
+    width:100%;
+    padding: 12px;
+    border-radius: 8px;
+    border:none;
+    background-color: #f8f9fa;
+    color: #333;
+}
+input:focus,
+textarea:focus{
+    outline:none;
+    box-shadow: 0 0 8px #bbb;
+    
+}
+button{
+   
+    font-size: 15px;
+    font-weight: 500;
+    color: black;
+    height: 45px;
+    width: 100%;
+    border: none;
+    border-radius: 30px;
+    outline: none;
+    background: rgba(255, 255, 255, 0.7);
+    cursor: pointer;
+    transition: .3s ease-in-out;
+}
+button:hover{
+    background: rgba(255, 255, 255, 0.5);
+    box-shadow: 1px 5px 7px 1px rgba(0, 0, 0, 0.2);
+}
+.contact-info{
+    text-align:left;
+}
+.contact-info h3{
+    font-size: 24px;
+    margin-bottom: 20px;
+    color:#fff;
+}
+.contact-info p{
+    margin-bottom: 10px;
+    color:#fff;
+}
+.contact-info i{
+    color:#4caf50;
+    margin-right: 10px;
+}
+
+@media screen and(max-width:768px){
+    .container{
+        padding:20px;
+    }
+    .contact-wrapper{
+        grid-template-columns: 1fr;
+    }
+}
+
+.nav{
+    position: fixed;
+    top: 0;
+    display: flex;
+    justify-content: space-around;
+    width: 100%;
+    height: 100px;
+    line-height: 100px;
+    background: linear-gradient(rgba(39,39,39, 0.6), transparent);
+    z-index: 100;
+}
+.nav-shield p{
+    color: white;
+    font-size: 25px;
+    font-weight: 600;
+}
+.nav-menu ul{
+    display: flex;
+}
+.nav-menu ul li{
+    list-style-type: none;
+}
+.nav-menu ul li .link{
+    text-decoration: none;
+    font-weight: 500;
+    color: #fff;
+    padding-bottom: 15px;
+    margin: 0 25px;
+}
+.link:hover, .active{
+    border-bottom: 2px solid #fff;
+}
+.nav-menu-btn{
+    display: none;
+}
+
+@media only screen and (max-width: 786px){
+    .nav-button{
+        display: none;
+    }
+    .nav-menu.responsive{
+        top: 100px;
+    }
+    .nav-menu{
+        position: absolute;
+        top: -800px;
+        display: flex;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.2);
+        width: 100%;
+        height: 90vh;
+        backdrop-filter: blur(20px);
+        transition: .3s;
+    }
+    .nav-menu ul{
+        flex-direction: column;
+        text-align: center;
+    }
+    .nav-menu-btn{
+        display: block;
+    }
+    .nav-menu-btn i{
+        font-size: 25px;
+        color: #fff;
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 50%;
+        cursor: pointer;
+        transition: .3s;
+    }
+    .nav-menu-btn i:hover{
+        background: rgba(255, 255, 255, 0.15);
+    }
+}
+@media only screen and (max-width: 540px) {
+    .wrapper{
+        min-height: 100vh;
+    }
+}
+
+footer {
+    /* Other styles */
+    position: relative;
+    bottom: 150px; /* Adjust this value as needed */
+    padding: 0px;
+}
+
+
+
+
+
+
+
+
+
+
+
+

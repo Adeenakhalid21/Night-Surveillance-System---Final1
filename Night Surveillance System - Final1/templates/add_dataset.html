@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add Dataset - Night Surveillance System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css') }}">
+    <style>
+        .form-container {
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 30px;
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+        
+        .form-title {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 2em;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #555;
+        }
+        
+        .form-input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+            box-sizing: border-box;
+        }
+        
+        .form-input:focus {
+            outline: none;
+            border-color: #007bff;
+        }
+        
+        .form-select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            background: white;
+            cursor: pointer;
+            box-sizing: border-box;
+        }
+        
+        .form-textarea {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            resize: vertical;
+            min-height: 100px;
+            box-sizing: border-box;
+        }
+        
+        .btn-container {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 30px;
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #0056b3;
+            transform: translateY(-2px);
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #545b62;
+        }
+        
+        .message {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .help-text {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+            font-style: italic;
+        }
+        
+        .required {
+            color: #dc3545;
+        }
+        
+        .dataset-types {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .type-option {
+            text-align: center;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <h2 class="form-title">Add New Dataset</h2>
+        
+        {% if message %}
+            <div class="message {{ 'success' if 'successfully' in message else 'error' }}">
+                {{ message }}
+            </div>
+        {% endif %}
+        
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label" for="dataset_name">
+                    Dataset Name <span class="required">*</span>
+                </label>
+                <input type="text" 
+                       id="dataset_name" 
+                       name="dataset_name" 
+                       class="form-input" 
+                       placeholder="e.g., Person Detection Dataset v1.0"
+                       required>
+                <div class="help-text">Choose a descriptive name for your dataset</div>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label" for="dataset_type">
+                    Dataset Type <span class="required">*</span>
+                </label>
+                <select id="dataset_type" name="dataset_type" class="form-select" required>
+                    <option value="">Select dataset type...</option>
+                    <option value="detection">🎯 Object Detection</option>
+                    <option value="classification">🏷️ Image Classification</option>
+                    <option value="tracking">📍 Object Tracking</option>
+                    <option value="faces">👤 Face Recognition</option>
+                    <option value="enhancement">🌙 Low-Light Enhancement</option>
+                    <option value="events">📊 Event Logging</option>
+                    <option value="training">🎓 Training Data</option>
+                    <option value="validation">✅ Validation Data</option>
+                </select>
+                
+                <div class="dataset-types">
+                    <div class="type-option">
+                        <strong>Detection:</strong><br>
+                        Bounding boxes & labels
+                    </div>
+                    <div class="type-option">
+                        <strong>Classification:</strong><br>
+                        Image categories
+                    </div>
+                    <div class="type-option">
+                        <strong>Enhancement:</strong><br>
+                        Low-light processing
+                    </div>
+                    <div class="type-option">
+                        <strong>Events:</strong><br>
+                        Security incidents
+                    </div>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label" for="description">Description</label>
+                <textarea id="description" 
+                         name="description" 
+                         class="form-textarea" 
+                         placeholder="Describe the purpose and contents of this dataset..."></textarea>
+                <div class="help-text">Optional: Provide details about what this dataset contains and its intended use</div>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label" for="file_path">Storage Path</label>
+                <input type="text" 
+                       id="file_path" 
+                       name="file_path" 
+                       class="form-input" 
+                       placeholder="datasets/my_dataset_name/"
+                       value="datasets/">
+                <div class="help-text">Directory where dataset files will be stored (will be created automatically)</div>
+            </div>
+            
+            <div class="btn-container">
+                <button type="submit" class="btn btn-primary">✅ Create Dataset</button>
+                <a href="{{ url_for('datasets') }}" class="btn btn-secondary">← Cancel</a>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        // Auto-generate file path based on dataset name
+        document.getElementById('dataset_name').addEventListener('input', function(e) {
+            const name = e.target.value.toLowerCase()
+                .replace(/[^a-z0-9]/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_|_$/g, '');
+            
+            if (name) {
+                document.getElementById('file_path').value = `datasets/${name}/`;
+            }
+        });
+        
+        // Show type-specific help based on selection
+        document.getElementById('dataset_type').addEventListener('change', function(e) {
+            const typeHelp = {
+                'detection': 'Perfect for training YOLO models and storing detection results with bounding boxes.',
+                'classification': 'Ideal for categorizing images into different classes (person, vehicle, etc.).',
+                'tracking': 'Store object tracking data across video frames.',
+                'faces': 'Face recognition and identification datasets.',
+                'events': 'Log security events, alerts, and incidents.',
+                'training': 'Curated training data for machine learning models.',
+                'validation': 'Test and validation datasets for model evaluation.'
+            };
+            
+            const helpDiv = document.querySelector('#dataset_type').parentNode.querySelector('.help-text');
+            if (helpDiv) {
+                helpDiv.textContent = typeHelp[e.target.value] || 'Select a type to see more information.';
+            }
+        });
+    </script>
+</body>
+</html>

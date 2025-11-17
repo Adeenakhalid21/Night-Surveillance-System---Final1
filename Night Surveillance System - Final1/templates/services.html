@@ -1,0 +1,71 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet' type="text/css">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='css/services-style.css')}}">
+    <title>Services Page</title>
+</head>
+<body>
+
+<!--navbar -->
+<div class="wrapper">
+    <nav class="nav">
+        <div class="nav-shield">
+            <p>NIGHT SHIELD </p>
+        </div>
+        <div class="nav-menu" id="navMenu">
+            <ul>
+                <li><a href="/" class="link">Home</a></li>
+                <li><a href="/services" class="link active">Services</a></li>
+                <li><a href="/about" class="link">About</a></li>
+                <li><a href="/contact" class="link">Contact</a></li>
+            </ul>
+        </div>
+        <div class="nav-menu-btn">
+            <i class="bx bx-menu" onclick="myMenuFunction()"></i>
+        </div>
+    </nav>
+</div>
+<!-- end of navbar -->
+
+    <div class="section">
+        <div class="title">
+            <h1>Our Services</h1>
+        </div>
+            <div class="services">
+                <div class="card">
+                    <div class="icon">
+                    <i class="bx bx-calendar"></i>
+                </div>
+                <h2>Automation</h2>
+                <p>Experience tailored automation solutions designed to streamline operations and boost productivity . From smart access management to automated lighting, optimize your resources with our customizable options. </p>
+                
+                   </div>
+                   <div class="card">
+                    <div class="icon">
+                    <i class="bx bx-wrench"></i>
+                </div>
+                <h2>Night Shield</h2>
+                <p>Our system employs cutting-edge AI algorithms to provide night Shield, ensuring security and monitoring of your premises. With advanced motion detection and real-time alerts, you can rest assured that your property is protected at all times.</div>
+                   <div class="card">
+                    <div class="icon">
+                    <i class="bx bx-support"></i>
+                </div>
+                <h2>Support</h2>
+                <p>Our dedicated team of experts for 24/7 technical support. Whether it's troubleshooting, system upgrades, or remote assistance, we are committed to delivering prompt and reliable support to ensure a seamless experience with our services.</p>
+                   </div>
+            </div>
+
+    </div>
+  <!-- Footer -->
+  <footer>
+    <p>&copy; 2024 Night Shield. All rights reserved.</p>
+</footer>
+
+<!-- Link your JavaScript file -->
+<script src="{{ url_for('static', filename='js/home-script.js')}}"></script>
+
+</body>
+
+</html>

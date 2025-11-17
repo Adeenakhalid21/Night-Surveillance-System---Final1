@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Root artifacts
+night_surveillance.db
+*.log
+*.pt
+*.onnx
+*.engine
+
+# Project nested folder ignores
+/Night Surveillance System - Final1/night_surveillance.db
+/Night Surveillance System - Final1/datasets/
+/Night Surveillance System - Final1/static/videos/
+/Night Surveillance System - Final1/static/images/detected_frame.jpg
+/Night Surveillance System - Final1/__pycache__/
+/Night Surveillance System - Final1/yolov8*.pt

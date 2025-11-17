@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data
+night_surveillance.db
+datasets/
+static/videos/
+static/images/detected_frame.jpg
+static/images/detection_*
+
+# Models / weights
+*.pt
+*.onnx
+*.engine
+
+# Logs
+*.log

@@ -1,0 +1,119 @@
+/* add camera */
+
+.add-camera{
+  margin-top: 0rem;
+  /* background-color: #f7f7f7;
+  padding: 20px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+   */
+}
+.add-camera h2{
+  margin-bottom: 0.4rem;
+}
+.add-camera .item{
+  background-color: var(--clr-white);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  border: 2px dashed;
+  margin: 10px 0;
+  width: 100%;
+  margin-bottom: 0.8rem;
+  color: var(--clr-dark-variant);
+  padding: 3.4rem var(--card-padding);
+  border-radius: var(--border-radius-3);
+  box-shadow: var(--box-shadow);
+}
+.add-camera .item:hover{
+  box-shadow: none;
+}
+
+/* ///////////////////////////////// */
+
+.camera-container {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+
+}
+.item:nth-child(2) {
+  margin-left: 20px;
+}
+
+/* .item {
+  margin: 10px;
+  cursor: pointer;
+} */
+
+.left {
+  float: left;
+}
+
+.right {
+  float: right;
+}
+
+.icon {
+  font-size: 36px;
+  color: #553ec8;
+}
+
+.icon:hover {
+  color: #333;
+}
+
+.camera-form {
+  /* padding: 20px;
+  background-color: #fff;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+  display: none; */
+  padding: var(--card-padding);
+  background-color: var(--clr-white);
+  border: 2px solid var(--clr-dark-variant);
+  border-radius: var(--border-radius-3);
+  box-shadow: var(--box-shadow);
+  margin-top: 0rem;
+  margin-bottom: 0.5rem;
+  display: none;
+}
+
+
+
+.camera-form label {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.camera-form input[type="text"],.camera-form select,.camera-form input[type="number"] {
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 20px;
+  border: 1px solid #ccc;
+  border-radius: var(--border-radius-2);
+}
+
+.camera-form button[type="submit"] {
+    background-color: rgb(67, 127, 211);
+    color: var(--clr-white);
+  padding: 10px 20px;
+  border: none;
+  border-radius: 30px;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.camera-form button[type="submit"]:hover {
+    background-color: var(--clr-primary);
+}
+
+.camera-form input[type="number"]:invalid {
+    color: red;
+   
+  }

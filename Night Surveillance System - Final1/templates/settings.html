@@ -1,0 +1,38 @@
+<!-- templates/settings.html -->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Intelligent Night Surveillance System</title>
+    <!-- Include any CSS or Bootstrap files here -->
+</head>
+<body>
+    <h1>Settings</h1>
+
+    <!-- Motion Detection Sensitivity -->
+    <label for="motion-sensitivity">Motion Detection Sensitivity:</label>
+    <input type="range" id="motion-sensitivity" name="motion-sensitivity" min="1" max="10">
+    <span id="sensitivity-value">5</span> <!-- Display the selected value -->
+
+    <!-- Object Types Configuration -->
+    <h2>Object Types Configuration</h2>
+    <label for="human">Human:</label>
+    <input type="checkbox" id="human" name="object-type" value="human">
+    <!-- Add similar checkboxes for other object types (animals, vehicles, etc.) -->
+
+    <!-- Other Settings (Add as needed) -->
+    <!-- ...
+
+    Example:
+    <label for="alert-email">Alert Email:</label>
+    <input type="email" id="alert-email" name="alert-email">
+    -->
+
+    <!-- Save Button -->
+    <button id="save-settings">Save Settings</button>
+
+    <!-- Include any JavaScript files for interactivity -->
+</body>
+</html>
