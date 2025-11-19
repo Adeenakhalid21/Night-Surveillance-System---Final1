@@ -86,6 +86,8 @@ def main():
     ap.add_argument('--out', type=str, default='datasets/prepared/coco_sample_pseudo', help='Output prepared dataset dir')
     ap.add_argument('--name', type=str, default='coco_sample_pseudo', help='Training run name')
     ap.add_argument('--max-images', type=int, default=0, help='Limit number of images (0 = all) for large datasets')
+    ap.add_argument('--resume-labels', action='store_true', help='Skip labeling if label file already exists')
+    ap.add_argument('--label-every', type=int, default=0, help='Only generate labels for every Nth image (0=all)')
     args = ap.parse_args()
 
     # Resolve paths
@@ -114,35 +116,47 @@ def main():
 
     for idx, img_path in enumerate(images, start=1):
         try:
-            # Choose split
             is_val = img_path in val_set
             img_dst_dir = dirs['images_val'] if is_val else dirs['images_train']
             lbl_dst_dir = dirs['labels_val'] if is_val else dirs['labels_train']
-
-            # Copy image to prepared dataset
             img_src = Path(img_path)
             img_dst = img_dst_dir / img_src.name
+            label_path = lbl_dst_dir / (img_src.stem + '.txt')
+
+            # Copy image only if not present
             if not img_dst.exists():
                 shutil.copy2(img_src, img_dst)
 
-            # Run detection for pseudo-label
+            # Optional: skip labeling on images already labeled when resuming
+            if args.resume_labels and label_path.exists():
+                if idx % 500 == 0:
+                    print(f"(resume) Skipped existing label for {img_src.name}")
+                continue
+
+            # Optional sampling: label only every Nth image
+            if args.label_every and args.label_every > 0 and idx % args.label_every != 0:
+                # Create empty label file if not present
+                if not label_path.exists():
+                    label_path.write_text('', encoding='utf-8')
+                if idx % 200 == 0:
+                    print(f"(sampling) Processed {idx}/{len(images)} images...")
+                continue
+
             results = model.predict(source=str(img_src), imgsz=args.imgsz, conf=args.conf, verbose=False)
             if not results:
-                # Create empty label
-                (lbl_dst_dir / (img_src.stem + '.txt')).write_text('', encoding='utf-8')
+                label_path.write_text('', encoding='utf-8')
             else:
                 r = results[0]
                 if r.boxes is None or r.boxes.xywhn is None or len(r.boxes) == 0:
-                    (lbl_dst_dir / (img_src.stem + '.txt')).write_text('', encoding='utf-8')
+                    label_path.write_text('', encoding='utf-8')
                 else:
                     xywhn = r.boxes.xywhn.cpu()
                     cls = r.boxes.cls.cpu()
-                    save_yolo_label(lbl_dst_dir / (img_src.stem + '.txt'), xywhn, cls)
+                    save_yolo_label(label_path, xywhn, cls)
 
             if idx % 200 == 0:
                 print(f"Processed {idx}/{len(images)} images...")
         except Exception as e:
-            # Skip problematic files
             print(f"Warning: failed {img_path}: {e}")
 
     # Write dataset YAML
