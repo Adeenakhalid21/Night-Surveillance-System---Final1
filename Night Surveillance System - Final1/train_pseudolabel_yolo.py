@@ -2,16 +2,22 @@
 """
 Train YOLOv8 with pseudo-labels generated from a pre-trained model.
 
-- Reads images from a dataset registered in SQLite (by dataset_name)
-- Generates YOLO-format labels using a base model's predictions
-- Prepares a train/val split and dataset YAML
-- Fine-tunes YOLO for a few epochs
+Features:
+    - Reads images from a dataset registered in SQLite (by --dataset name)
+    - Generates YOLO-format labels using a base model's predictions
+    - Supports batching for faster pseudo-label inference (--infer-batch)
+    - Resume capability (--resume-labels) skips already labeled images
+    - Sampling (--label-every N) to sparsely label then later refine
+    - Adjustable image size (--imgsz) and device selection (--device)
+    - Graceful KeyboardInterrupt handling (partial progress preserved)
+    - Random seed control (--seed) for reproducible shuffles
 
 Usage (example):
-  python train_pseudolabel_yolo.py \
-    --dataset "COCO Train2017 Sample" \
-    --weights yolov8n.pt \
-    --epochs 5 --batch 16 --imgsz 640 --conf 0.5
+    python train_pseudolabel_yolo.py \
+        --dataset "COCO Train2017 Sample" \
+        --weights yolov8s.pt \
+        --epochs 30 --batch 32 --imgsz 640 --conf 0.4 \
+        --infer-batch 8 --resume-labels --max-images 5000
 """
 from __future__ import annotations
 import os
@@ -21,7 +27,7 @@ import random
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import List
+from typing import List, Iterable
 
 from ultralytics import YOLO
 
@@ -46,6 +52,15 @@ def fetch_image_paths(dataset_name: str) -> List[str]:
     conn.close()
     imgs = [r['image_path'] for r in rows if r['image_path'] and os.path.exists(r['image_path'])]
     if not imgs:
+        # Help the user by listing available datasets when paths are invalid
+        try:
+            conn = get_db_connection()
+            ds = conn.execute('SELECT dataset_name, COUNT(*) FROM datasets d JOIN training_data t ON d.dataset_id=t.dataset_id GROUP BY d.dataset_name').fetchall()
+            conn.close()
+            names = ', '.join([f"{r[0]}({r[1]})" for r in ds])
+            print(f"Available datasets with counts: {names}")
+        except Exception:
+            pass
         raise SystemExit("No images found or paths are invalid for the selected dataset.")
     return imgs
 
@@ -88,6 +103,19 @@ def main():
     ap.add_argument('--max-images', type=int, default=0, help='Limit number of images (0 = all) for large datasets')
     ap.add_argument('--resume-labels', action='store_true', help='Skip labeling if label file already exists')
     ap.add_argument('--label-every', type=int, default=0, help='Only generate labels for every Nth image (0=all)')
+    ap.add_argument('--infer-batch', type=int, default=1, help='Batch size for pseudo-label inference (>=1)')
+    ap.add_argument('--device', type=str, default='', help='YOLO device id ("cpu", "0" for first CUDA GPU, blank=auto)')
+    ap.add_argument('--seed', type=int, default=0, help='Random seed (0 = no fixed seed)')
+    # Training speed/robustness
+    ap.add_argument('--freeze', type=int, default=0, help='Freeze N layers for faster fine-tuning')
+    ap.add_argument('--patience', type=int, default=5, help='Early stopping patience (epochs)')
+    ap.add_argument('--cos-lr', action='store_true', help='Use cosine learning rate schedule')
+    ap.add_argument('--workers', type=int, default=0, help='Dataloader workers (0 recommended on Windows/CPU)')
+    ap.add_argument('--cache-images', action='store_true', help='Cache images for faster training (RAM heavy)')
+    ap.add_argument('--fast-preset', action='store_true', help='Enable a CPU-friendly fast training preset')
+    ap.add_argument('--path-repair-from', type=str, default='', help='Old prefix to replace if image paths broken')
+    ap.add_argument('--path-repair-to', type=str, default='', help='New prefix to substitute for broken image paths')
+    ap.add_argument('--allow-missing', action='store_true', help='Allow missing images (skip existence check)')
     args = ap.parse_args()
 
     # Resolve paths
@@ -95,7 +123,35 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Gather images
-    images = fetch_image_paths(args.dataset)
+    # Raw image paths (may be broken); fetch without existence filtering so we can repair.
+    conn = get_db_connection()
+    row = conn.execute('SELECT dataset_id FROM datasets WHERE dataset_name=?', (args.dataset,)).fetchone()
+    if not row:
+        conn.close(); raise SystemExit(f"Dataset not found: {args.dataset}")
+    dataset_id = row['dataset_id']
+    db_rows = conn.execute('SELECT image_path FROM training_data WHERE dataset_id=?', (dataset_id,)).fetchall()
+    conn.close()
+    raw_paths = [r['image_path'] for r in db_rows if r['image_path']]
+    repaired = []
+    for p in raw_paths:
+        candidate = p
+        if args.path_repair_from and args.path_repair_to and p.startswith(args.path_repair_from):
+            candidate = args.path_repair_to + p[len(args.path_repair_from):]
+        # Workspace-relative common case: prepend workspace folder if path starts with 'datasets/'
+        if not os.path.isabs(candidate) and candidate.startswith('datasets/'):
+            maybe = os.path.join('Night Surveillance System - Final1', candidate)
+            if os.path.exists(maybe):
+                candidate = maybe
+        if args.allow_missing or os.path.exists(candidate):
+            repaired.append(candidate)
+    if not repaired:
+        print('Path repair failed or no images found. Example original paths:', raw_paths[:5])
+        if not args.allow_missing:
+            print('Hint: try --allow-missing or provide --path-repair-from and --path-repair-to.')
+        raise SystemExit('No usable images after path repair attempts.')
+    images = repaired
+    if args.seed:
+        random.seed(args.seed)
     if args.max_images and args.max_images > 0:
         if args.max_images < len(images):
             print(f"Limiting to first {args.max_images} images out of {len(images)} total.")
@@ -109,55 +165,94 @@ def main():
     # Prepare folders
     dirs = prepare_dirs(out_dir)
 
-    # Load model once
+    # Optional fast preset overrides (for CPU)
+    if args.fast_preset:
+        # Safer, faster defaults on CPU while keeping accuracy reasonable
+        args.imgsz = min(args.imgsz, 512)
+        args.infer_batch = max(args.infer_batch, 8)
+        args.label_every = args.label_every or 3
+        args.conf = min(args.conf, 0.4)
+        args.batch = min(args.batch, 16)
+        args.epochs = min(args.epochs, 15)
+        args.freeze = max(args.freeze, 10)
+        args.patience = min(args.patience, 3)
+        args.workers = 0
+        args.device = args.device or 'cpu'
+
+    # Load model once for pseudo-labeling
+    device_arg = args.device if args.device else None
     model = YOLO(args.weights)
 
-    print(f"Preparing pseudo-labels for {len(images)} images with conf>={args.conf}...")
+    print(f"Preparing pseudo-labels for {len(images)} images with conf>={args.conf} (batch={args.infer_batch})...")
+    total = len(images)
+    infer_batch = max(1, args.infer_batch)
 
-    for idx, img_path in enumerate(images, start=1):
-        try:
-            is_val = img_path in val_set
-            img_dst_dir = dirs['images_val'] if is_val else dirs['images_train']
-            lbl_dst_dir = dirs['labels_val'] if is_val else dirs['labels_train']
-            img_src = Path(img_path)
-            img_dst = img_dst_dir / img_src.name
-            label_path = lbl_dst_dir / (img_src.stem + '.txt')
+    try:
+        for start in range(0, total, infer_batch):
+            chunk = images[start:start + infer_batch]
+            # Determine which need labeling (consider resume and sampling logic individually)
+            to_predict = []
+            per_image_meta = []  # tuples of (img_src, img_dst, label_path, is_val, should_label)
+            for idx_in_chunk, img_path in enumerate(chunk, start=start + 1):
+                is_val = img_path in val_set
+                img_dst_dir = dirs['images_val'] if is_val else dirs['images_train']
+                lbl_dst_dir = dirs['labels_val'] if is_val else dirs['labels_train']
+                img_src = Path(img_path)
+                img_dst = img_dst_dir / img_src.name
+                label_path = lbl_dst_dir / (img_src.stem + '.txt')
 
-            # Copy image only if not present
-            if not img_dst.exists():
-                shutil.copy2(img_src, img_dst)
+                if not img_dst.exists():
+                    shutil.copy2(img_src, img_dst)
 
-            # Optional: skip labeling on images already labeled when resuming
-            if args.resume_labels and label_path.exists():
-                if idx % 500 == 0:
-                    print(f"(resume) Skipped existing label for {img_src.name}")
-                continue
+                # Resume skip
+                if args.resume_labels and label_path.exists():
+                    per_image_meta.append((img_src, img_dst, label_path, is_val, False))
+                    continue
 
-            # Optional sampling: label only every Nth image
-            if args.label_every and args.label_every > 0 and idx % args.label_every != 0:
-                # Create empty label file if not present
-                if not label_path.exists():
-                    label_path.write_text('', encoding='utf-8')
-                if idx % 200 == 0:
-                    print(f"(sampling) Processed {idx}/{len(images)} images...")
-                continue
+                # Sampling skip (create empty label file)
+                if args.label_every and args.label_every > 0 and idx_in_chunk % args.label_every != 0:
+                    if not label_path.exists():
+                        label_path.write_text('', encoding='utf-8')
+                    per_image_meta.append((img_src, img_dst, label_path, is_val, False))
+                    continue
 
-            results = model.predict(source=str(img_src), imgsz=args.imgsz, conf=args.conf, verbose=False)
-            if not results:
-                label_path.write_text('', encoding='utf-8')
-            else:
-                r = results[0]
-                if r.boxes is None or r.boxes.xywhn is None or len(r.boxes) == 0:
-                    label_path.write_text('', encoding='utf-8')
-                else:
-                    xywhn = r.boxes.xywhn.cpu()
-                    cls = r.boxes.cls.cpu()
-                    save_yolo_label(label_path, xywhn, cls)
+                # Will label this image
+                to_predict.append(str(img_src))
+                per_image_meta.append((img_src, img_dst, label_path, is_val, True))
 
-            if idx % 200 == 0:
-                print(f"Processed {idx}/{len(images)} images...")
-        except Exception as e:
-            print(f"Warning: failed {img_path}: {e}")
+            results = []
+            if to_predict:
+                try:
+                    results = model.predict(source=to_predict, imgsz=args.imgsz, conf=args.conf, verbose=False, device=device_arg)
+                except Exception as e:
+                    print(f"Batch predict failed (start={start}): {e}")
+
+            # Assign labels
+            res_iter: Iterable = iter(results) if results else iter([])
+            for idx_in_chunk, meta in enumerate(per_image_meta, start=start + 1):
+                img_src, img_dst, label_path, is_val, should_label = meta
+                try:
+                    if not should_label:
+                        if args.resume_labels and idx_in_chunk % 500 == 0:
+                            print(f"(resume) Skipped existing label for {img_src.name}")
+                        elif args.label_every and args.label_every > 0 and idx_in_chunk % 200 == 0:
+                            print(f"(sampling) Processed {idx_in_chunk}/{total} images...")
+                        continue
+                    r = next(res_iter, None)
+                    if r is None or r.boxes is None or r.boxes.xywhn is None or len(r.boxes) == 0:
+                        label_path.write_text('', encoding='utf-8')
+                    else:
+                        xywhn = r.boxes.xywhn.cpu()
+                        cls = r.boxes.cls.cpu()
+                        save_yolo_label(label_path, xywhn, cls)
+                except Exception as e:
+                    print(f"Warning: failed {img_src}: {e}")
+
+            if (start + infer_batch) % 200 == 0 or (start + infer_batch) >= total:
+                done = min(start + infer_batch, total)
+                print(f"Processed {done}/{total} images...")
+    except KeyboardInterrupt:
+        print("\nKeyboardInterrupt detected: stopping pseudo-label generation early. Partial labels preserved.")
 
     # Write dataset YAML
     yaml_path = out_dir / 'dataset.yaml'
@@ -179,11 +274,28 @@ names: [person, bicycle, car, motorcycle, airplane, bus, train, truck, boat, tra
     yaml_path.write_text(yaml_content, encoding='utf-8')
     print(f"Dataset YAML written: {yaml_path}")
 
-    # Train
-    print("Starting YOLO training...")
-    finetune = YOLO(args.weights)
-    finetune.train(data=str(yaml_path), epochs=args.epochs, imgsz=args.imgsz, batch=args.batch, name=args.name)
-    print("Training complete.")
+    # Train (only if epochs > 0)
+    if args.epochs > 0:
+        print("Starting YOLO training...")
+        finetune = YOLO(args.weights)
+        train_kwargs = dict(
+            data=str(yaml_path),
+            epochs=args.epochs,
+            imgsz=args.imgsz,
+            batch=args.batch,
+            name=args.name,
+            device=device_arg,
+            workers=args.workers,
+            patience=args.patience,
+            freeze=args.freeze,
+            cos_lr=args.cos_lr,
+        )
+        if args.cache_images:
+            train_kwargs['cache'] = True
+        finetune.train(**train_kwargs)
+        print("Training complete.")
+    else:
+        print("Epochs set to 0 - skipping training phase (labels only).")
 
 
 if __name__ == '__main__':

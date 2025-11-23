@@ -24,5 +24,4 @@ Thumbs.db
 # Project outputs
 **/datasets/
 **/runs/
-**/static/videos/
-**/static/images/detected_frame.jpg
+**/static/

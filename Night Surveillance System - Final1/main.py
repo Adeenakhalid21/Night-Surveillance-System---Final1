@@ -211,38 +211,45 @@ def video_stream(source, stop_event):
     prev_frame = cv2.resize(prev_frame, (640, 480))
 
     while not stop_event.is_set() and cap.isOpened():
-        # Skip 5 frames
-        for _ in range(5):
+        # Skip a few frames for efficiency
+        for _ in range(3):
             cap.read()
 
         ret, frame = cap.read()
-        
         if not ret:
             break
 
-        # Resize the frame for faster processing
+        # Resize for consistent processing speed
         frame = cv2.resize(frame, (640, 480))
-        
-        frame_bytes = b''  # Define frame_bytes outside the if statement
-        
+
+        # Default: send raw frame (ensures stream never blanks)
+        output_frame = frame
+
         if prev_frame is not None:
             motion_detection(prev_frame, frame)
-            
             if motion_detected:
+                try:
+                    enhanced_frame = enhance_image(frame)
+                except Exception:
+                    enhanced_frame = frame
+                try:
+                    output_frame = detect_objects_and_classify(enhanced_frame)
+                except Exception as e:
+                    print(f"Detection error: {e}")
+                    output_frame = enhanced_frame
 
-                # Enhance the image before processing
-                enhanced_frame = enhance_image(frame)
-                
-                detected_frame = detect_objects_and_classify(enhanced_frame)
-                
-                # Convert frame to JPEG
-                _, jpeg = cv2.imencode('.jpg', detected_frame)
-                frame_bytes = jpeg.tobytes()
-        
+        # Always encode a frame (prevents broken image tag showing alt text)
+        try:
+            _, jpeg = cv2.imencode('.jpg', output_frame)
+            frame_bytes = jpeg.tobytes()
+        except Exception as e:
+            print(f"JPEG encode failed: {e}")
+            frame_bytes = b''
+
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-        if motion_detected:
-            prev_frame = frame.copy()  # Update previous frame if motion is detected
+        # Update previous frame every loop for motion comparison
+        prev_frame = frame.copy()
 
     cap.release()
 
@@ -434,48 +441,49 @@ def login():
 
         conn = get_db_connection()
         try:
-            # If input looks like an email, match on email; otherwise allow firstname as a simple username
             identifier = raw_identifier.lower()
+            user = None
             if '@' in identifier:
-                user = conn.execute('SELECT * FROM user WHERE LOWER(email) = ? AND password = ?',
-                                    (identifier, password)).fetchone()
+                # Email login
+                user = conn.execute('SELECT * FROM user WHERE LOWER(email) = ?', (identifier,)).fetchone()
             else:
-                user = conn.execute('SELECT * FROM user WHERE LOWER(firstname) = ? AND password = ?',
-                                    (identifier, password)).fetchone()
+                # First or last name login fallback
+                user = conn.execute('SELECT * FROM user WHERE LOWER(firstname) = ? OR LOWER(lastname) = ?', (identifier, identifier)).fetchone()
 
-            if user:
-                session['loggedin'] = True
-                session['sno'] = user['sno']
-                session['firstname'] = user['firstname']
-                session['email'] = user['email']
-                mesage = 'Logged in successfully!'
-                # Log auth success to surveillance_events for audit visibility
-                try:
-                    log_surveillance_event_db({
-                        'camera_id': None,
-                        'event_type': 'login_success',
-                        'severity': 'low',
-                        'description': f"Login success for {user['email']}",
-                        'image_path': None,
-                        'video_path': None
-                    })
-                except Exception:
-                    pass
-                return render_template('dashboard.html', mesage=mesage)
+            if not user:
+                mesage = 'User not found. Please register first or check spelling.'
             else:
-                mesage = 'Invalid credentials. Use your email or first name with the correct password.'
-                # Log auth failure to surveillance_events
-                try:
-                    log_surveillance_event_db({
-                        'camera_id': None,
-                        'event_type': 'login_failed',
-                        'severity': 'low',
-                        'description': f"Login failed for identifier '{identifier}'",
-                        'image_path': None,
-                        'video_path': None
-                    })
-                except Exception:
-                    pass
+                if user['password'] != password:
+                    mesage = 'Password incorrect. Please try again.'
+                    try:
+                        log_surveillance_event_db({
+                            'camera_id': None,
+                            'event_type': 'login_failed',
+                            'severity': 'low',
+                            'description': f"Login failed (bad password) for '{identifier}'",
+                            'image_path': None,
+                            'video_path': None
+                        })
+                    except Exception:
+                        pass
+                else:
+                    session['loggedin'] = True
+                    session['sno'] = user['sno']
+                    session['firstname'] = user['firstname']
+                    session['email'] = user['email']
+                    mesage = 'Logged in successfully!'
+                    try:
+                        log_surveillance_event_db({
+                            'camera_id': None,
+                            'event_type': 'login_success',
+                            'severity': 'low',
+                            'description': f"Login success for {user['email']}",
+                            'image_path': None,
+                            'video_path': None
+                        })
+                    except Exception:
+                        pass
+                    return render_template('dashboard.html', mesage=mesage)
         finally:
             conn.close()
     return render_template('home.html', mesage=mesage)

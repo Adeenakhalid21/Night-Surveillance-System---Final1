@@ -1,25 +1,32 @@
 import cv2
-from scipy import ndimage
 
 def enhance_image(image):
-    # Convert image to gray scale
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    """Light enhancement while preserving color.
 
-    # Non-Linear filter for noise removal
-    deNoised = ndimage.median_filter(gray_image, 3)
+    Steps:
+      1. Convert to LAB and apply CLAHE on L channel for contrast.
+      2. Median blur L slightly for noise suppression.
+      3. Optional mild gamma correction on luminance LUT.
+      4. Recombine with original A/B for true color output.
+    """
+    if image is None or image.size == 0:
+        return image
 
-    # Histogram Equalizer
-    # High pass filter for improving the contrast of the image
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    highPass = clahe.apply(deNoised)
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
 
-    # Gamma Transformation
-    # Prevent bleaching or darkening of images
-    gamma = highPass / 255.0
-    gammaFilter = cv2.pow(gamma, 1.5)
-    gammaFilter = gammaFilter * 255
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_eq = clahe.apply(l)
 
-    # Convert enhanced image back to BGR
-    enhanced_frame = cv2.cvtColor(gammaFilter.astype('uint8'), cv2.COLOR_GRAY2BGR)
+    l_eq = cv2.medianBlur(l_eq, 3)
 
-    return enhanced_frame
+    # Gamma correction (mild) using LUT for speed
+    gamma = 1.15
+    inv_gamma = 1.0 / gamma
+    lut = ( ( (i / 255.0) ** inv_gamma ) * 255 for i in range(256) )
+    lut = bytearray(int(v) for v in lut)
+    l_gamma = cv2.LUT(l_eq, lut)
+
+    lab_enhanced = cv2.merge((l_gamma, a, b))
+    enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+    return enhanced

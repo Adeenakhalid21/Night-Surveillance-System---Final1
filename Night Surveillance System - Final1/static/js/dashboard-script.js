@@ -11,10 +11,23 @@ closeBtn.addEventListener('click', () => {
 });
 
 const themeToggler = document.querySelector('.theme-toggler');
+
+// Persist theme preference
+try {
+    const storedTheme = localStorage.getItem('theme-pref');
+    if (storedTheme === 'dark') {
+        document.body.classList.add('dark-theme-variables');
+        themeToggler?.querySelector('span:nth-child(2)')?.classList.add('active');
+    } else {
+        themeToggler?.querySelector('span:nth-child(1)')?.classList.add('active');
+    }
+} catch (e) {}
+
 themeToggler.addEventListener('click', () => {
-    document.body.classList.toggle('dark-theme-variables');
-    themeToggler.querySelector('span:nth-child(1)').classList.toggle('active');
-    themeToggler.querySelector('span:nth-child(2)').classList.toggle('active');
+    const isDark = document.body.classList.toggle('dark-theme-variables');
+    themeToggler.querySelector('span:nth-child(1)').classList.toggle('active', !isDark);
+    themeToggler.querySelector('span:nth-child(2)').classList.toggle('active', isDark);
+    try { localStorage.setItem('theme-pref', isDark ? 'dark' : 'light'); } catch (e) {}
 });
 
 // Camera feature
