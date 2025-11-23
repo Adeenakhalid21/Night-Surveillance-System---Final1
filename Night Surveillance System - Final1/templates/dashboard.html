@@ -72,13 +72,20 @@
       <main>
            <h1>Dashboard</h1>
 
-           <div class="date">
+           <div class="date" style="display:flex; align-items:center; gap:1rem;">
              <input type="date" >
+             <span style="opacity:.8;">Welcome, {{ session.get('firstname','User') }}</span>
            </div>
 
         
-        <div id="video-container ">
-          <img id="video-stream" src="{{ url_for('video_feed') }}" alt="Video Stream">
+        <div id="video-container" class="card">
+          <div class="card-header">
+            <span class="material-symbols-sharp">videocam</span>
+            <h3>Live Video</h3>
+          </div>
+          <div class="card-body">
+            <img id="video-stream" src="{{ url_for('video_feed') }}" alt="Video Stream">
+          </div>
         </div>
 
       
@@ -116,30 +123,49 @@
 
 
         <div class="insights">
-
-           <!-- start seling -->
-            <div class="sales">
-               <span class="material-symbols-sharp">camera</span>
-               <div class="middle">
-
-                 <div class="left">
-                   <h3>Live Monitoring</h3>
-                   <h1>Active:1</h1>
-                 </div>
-                  <div class="progress">
-                      <svg>
-                         <circle  r="30" cy="40" cx="40"></circle>
-                      </svg>
-                      <div class="number"><p>80%</p></div> 
-                      <!-- represent the coverage percentage of surveillance area -->
-                  </div>
-
-               </div>
-               <small>Last 24 Hours</small>
+            <div class="stat card">
+              <span class="material-symbols-sharp">videocam</span>
+              <div class="middle">
+                <div class="left">
+                  <h3>Cameras</h3>
+                  <h1>{{ cam_count }}</h1>
+                </div>
+              </div>
+              <small>Total configured</small>
             </div>
-            
-           <!-- end seling -->
 
+            <div class="stat card">
+              <span class="material-symbols-sharp">dataset</span>
+              <div class="middle">
+                <div class="left">
+                  <h3>Datasets</h3>
+                  <h1>{{ dataset_count }}</h1>
+                </div>
+              </div>
+              <small>Available</small>
+            </div>
+
+            <div class="stat card">
+              <span class="material-symbols-sharp">visibility</span>
+              <div class="middle">
+                <div class="left">
+                  <h3>Detections</h3>
+                  <h1>{{ detections_count }}</h1>
+                </div>
+              </div>
+              <small>All time</small>
+            </div>
+
+            <div class="stat card">
+              <span class="material-symbols-sharp">security</span>
+              <div class="middle">
+                <div class="left">
+                  <h3>Events</h3>
+                  <h1>{{ events_count }}</h1>
+                </div>
+              </div>
+              <small>All time</small>
+            </div>
         </div>
          
      

@@ -266,6 +266,29 @@ b{
    transition: all .3s ease;
 }
 
+/* Simple reusable card */
+.card {
+  background: var(--clr-white);
+  border-radius: var(--border-radius-2);
+  box-shadow: var(--box-shadow);
+  padding: var(--card-padding);
+}
+.card:hover{ transform: translateY(-2px); box-shadow: 0 14px 30px rgba(0,0,0,0.2); }
+.card-header{
+  display:flex; align-items:center; gap:.6rem; margin-bottom:.6rem; color:var(--clr-dark);
+}
+.card-header h3{ font-size:1rem; }
+.card-body{ width:100%; }
+
+/* Video container polish */
+#video-container{ margin-top:1rem; }
+#video-stream{ width:100%; max-height:540px; object-fit:contain; border-radius: .8rem; }
+
+/* Stat cards match insights styling */
+.stat span{ background: coral; padding:.5rem; border-radius:50%; color:#fff; font-size:2rem; }
+.stat.card{ background: linear-gradient(145deg, rgba(255,255,255,0.9), rgba(255,255,255,0.75)); }
+.dark-theme-variables .stat.card{ background: linear-gradient(145deg, rgba(17,24,39,0.9), rgba(31,41,55,0.75)); }
+
 .right .insights > div:hover{
   box-shadow: none;
 }

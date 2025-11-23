@@ -43,3 +43,32 @@ function myMenuFunction() {
         }
     }
     
+// Show/Hide password toggles
+document.addEventListener('DOMContentLoaded', function() {
+    var loginPw = document.getElementById('passwordField');
+    var regPw = document.getElementById('registerPasswordField');
+    var tLogin = document.getElementById('toggleLoginPw');
+    var tReg = document.getElementById('toggleRegisterPw');
+
+    function wire(btn, input){
+        if (!btn || !input) return;
+        var icon = btn.querySelector('i');
+        function setState(showing){
+            if (!icon) return;
+            icon.classList.toggle('bx-show', !showing);
+            icon.classList.toggle('bx-hide', showing);
+            btn.title = showing ? 'Hide password' : 'Show password';
+            btn.setAttribute('aria-label', btn.title);
+        }
+        btn.addEventListener('click', function(){
+            var isHidden = input.getAttribute('type') === 'password';
+            input.setAttribute('type', isHidden ? 'text' : 'password');
+            setState(isHidden);
+        });
+        // ensure initial icon state reflects current type
+        setState(false);
+    }
+
+    wire(tLogin, loginPw);
+    wire(tReg, regPw);
+});

@@ -32,6 +32,10 @@ app.config['UPLOAD_FOLDER'] = 'static/videos'
 app.config['ALLOWED_EXTENSIONS'] = {'mp4', 'avi', 'mov', 'mkv'}
 
 
+DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
+IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person') or 'person').split(',') if s.strip()}
+ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
@@ -68,45 +72,49 @@ def detect_objects_and_classify(frame, camera_id=1):
 
         # Filter out classes not in desired_classes
         if class_name in desired_classes:
-            
-            # Save the detected frame as an image with timestamp
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
             os.makedirs('static/images', exist_ok=True)
-            detection_image_path = f'static/images/detection_{timestamp}_{class_name}.jpg'
-            cv2.imwrite(detection_image_path, frame)
-            
-            # Save detection to dataset
-            save_detection_to_dataset_db({
-                'camera_id': camera_id,
-                'object_class': class_name,
-                'confidence': conf,
-                'bbox_x': x1,
-                'bbox_y': y1,
-                'bbox_width': x2 - x1,
-                'bbox_height': y2 - y1,
-                'image_path': detection_image_path,
-                'dataset_id': 1  # Person Detection Dataset ID
-            })
-            
-            # Log surveillance event
-            log_surveillance_event_db({
-                'camera_id': camera_id,
-                'event_type': f'{class_name}_detected',
-                'severity': 'medium',
-                'description': f'{class_name.title()} detected with {conf:.2f} confidence',
-                'image_path': detection_image_path
-            })
+            # Choose pathing depending on whether we store per-detection artifacts
+            if not DISABLE_DETECTION_DB:
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                detection_image_path = f'static/images/detection_{timestamp}_{class_name}.jpg'
+                cv2.imwrite(detection_image_path, frame)
+            else:
+                detection_image_path = 'static/images/detected_frame.jpg'
+                cv2.imwrite(detection_image_path, frame)
 
-            # Keep the original detected frame for email
-            att = 'static/images/detected_frame.jpg'
-            os.makedirs('static/images', exist_ok=True)
-            cv2.imwrite(att, frame)
+            # Optionally store detection rows (disabled by default)
+            if not DISABLE_DETECTION_DB:
+                save_detection_to_dataset_db({
+                    'camera_id': camera_id,
+                    'object_class': class_name,
+                    'confidence': conf,
+                    'bbox_x': x1,
+                    'bbox_y': y1,
+                    'bbox_width': x2 - x1,
+                    'bbox_height': y2 - y1,
+                    'image_path': detection_image_path,
+                    'dataset_id': 1
+                })
 
-            # Send email alert in a separate thread
-            subject = "Motion Detected!"
-            to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
-            body = f"Motion of {class_name} has been detected by the surveillance system."
-            threading.Thread(target=send_email_alert, args=(subject, body, to, att)).start()
+            # Only log/alert important items
+            if class_name.lower() in IMPORTANT_CLASSES and conf >= ALERT_CONF_MIN:
+                log_surveillance_event_db({
+                    'camera_id': camera_id,
+                    'event_type': f'{class_name}_detected',
+                    'severity': 'medium',
+                    'description': f'{class_name.title()} detected with {conf:.2f} confidence',
+                    'image_path': detection_image_path
+                })
+
+                # Keep the original detected frame for email (overwrites single file)
+                att = 'static/images/detected_frame.jpg'
+                cv2.imwrite(att, frame)
+
+                # Send email alert in a separate thread
+                subject = "Motion Detected!"
+                to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+                body = f"Motion of {class_name} has been detected by the surveillance system."
+                threading.Thread(target=send_email_alert, args=(subject, body, to, att)).start()
 
     return frame
 
@@ -114,6 +122,8 @@ def detect_objects_and_classify(frame, camera_id=1):
 def save_detection_to_dataset_db(detection_data):
     """Save detection result to database"""
     try:
+        if DISABLE_DETECTION_DB:
+            return
         conn = get_db_connection()
         conn.execute('''
             INSERT INTO detection_results 
@@ -292,12 +302,58 @@ app.secret_key = 'mysecretkey'
 
 # SQLite database configuration
 DATABASE = 'night_surveillance.db'
+USE_PG = bool(os.getenv('SUPABASE_DB_URL') or os.getenv('DATABASE_URL'))
+
+class PGCursor:
+    def __init__(self, cur):
+        self._cur = cur
+    def fetchone(self):
+        return self._cur.fetchone()
+    def fetchall(self):
+        return self._cur.fetchall()
+
+class PGConn:
+    def __init__(self, conn):
+        self._conn = conn
+        self.row_factory = None
+    def execute(self, sql, params=None):
+        sql_ps = sql.replace('?', '%s')
+        # Quote reserved table name user for Postgres using regex, covers start/end and joins
+        def _quote_user_table(s: str) -> str:
+            patterns = [
+                (r'(?i)(\bfrom\s+)user(\b)', r'\1"user"\2'),
+                (r'(?i)(\binsert\s+into\s+)user(\b)', r'\1"user"\2'),
+                (r'(?i)(\bupdate\s+)user(\b)', r'\1"user"\2'),
+                (r'(?i)(\bdelete\s+from\s+)user(\b)', r'\1"user"\2'),
+                (r'(?i)(\bjoin\s+)user(\b)', r'\1"user"\2'),
+            ]
+            for p, rpl in patterns:
+                s = re.sub(p, rpl, s)
+            return s
+        sql_ps = _quote_user_table(sql_ps)
+        cur = self._conn.cursor()
+        cur.execute(sql_ps, params or ())
+        return PGCursor(cur)
+    def commit(self):
+        self._conn.commit()
+    def close(self):
+        self._conn.close()
 
 # Function to get database connection
 def get_db_connection():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if USE_PG:
+        import psycopg2, psycopg2.extras
+        dsn = os.getenv('SUPABASE_DB_URL') or os.getenv('DATABASE_URL')
+        if not dsn:
+            raise RuntimeError('DATABASE_URL/SUPABASE_DB_URL not set')
+        if 'sslmode=' not in dsn:
+            dsn = dsn + ('&' if '?' in dsn else '?') + 'sslmode=require'
+        conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.DictCursor)
+        return PGConn(conn)
+    else:
+        conn = sqlite3.connect(DATABASE)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 # Initialize database
 def init_db():
@@ -392,7 +448,8 @@ def init_db():
     conn.close()
 
 # Initialize database when app starts
-init_db()
+if not USE_PG:
+    init_db()
 
 # Signup API
 @app.route('/signup', methods=['GET', 'POST'])
@@ -491,7 +548,27 @@ def login():
 
 @app.route('/dashboard')
 def dashboard():
-    return render_template('dashboard.html')
+    cam_count = dataset_count = detections_count = events_count = 0
+    try:
+        conn = get_db_connection()
+        if USE_PG:
+            cam_count = conn.execute('SELECT COUNT(*) FROM cam').fetchone()[0]
+            dataset_count = conn.execute('SELECT COUNT(*) FROM datasets').fetchone()[0]
+            detections_count = conn.execute('SELECT COUNT(*) FROM detection_results').fetchone()[0]
+            events_count = conn.execute('SELECT COUNT(*) FROM surveillance_events').fetchone()[0]
+        else:
+            cam_count = conn.execute('SELECT COUNT(*) FROM cam').fetchone()[0]
+            dataset_count = conn.execute('SELECT COUNT(*) FROM datasets').fetchone()[0]
+            detections_count = conn.execute('SELECT COUNT(*) FROM detection_results').fetchone()[0]
+            events_count = conn.execute('SELECT COUNT(*) FROM surveillance_events').fetchone()[0]
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return render_template('dashboard.html', cam_count=cam_count, dataset_count=dataset_count, detections_count=detections_count, events_count=events_count)
 
 @app.route('/addCamera')
 def addCamera():
@@ -638,6 +715,8 @@ def dataset_details(dataset_id):
 def save_detection_to_dataset():
     """Save detection result to dataset"""
     data = request.get_json()
+    if DISABLE_DETECTION_DB:
+        return jsonify({'status': 'skipped', 'message': 'Detection persistence disabled by server config'}), 200
     
     conn = get_db_connection()
     try:

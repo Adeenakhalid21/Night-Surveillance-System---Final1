@@ -152,7 +152,7 @@ header{
     color: #fff;
     height: 50px;
     width: 100%;
-    padding: 0 10px 0 45px;
+    padding: 0 56px 0 45px; /* leave space for eye button */
     border: none;
     border-radius: 30px;
     outline: none;
@@ -197,6 +197,23 @@ header{
 .two-col .one{
     display: flex;
     gap: 5px;
+}
+
+/* Eye toggle button */
+.pw-toggle{
+    position:absolute; right:16px; top:50%; transform: translateY(-50%);
+    background: transparent; border: 0; z-index: 2;
+    color:#fff; cursor:pointer; display:flex; align-items:center; justify-content:center;
+    width:32px; height:32px; border-radius:50%; line-height:1;
+}
+.pw-toggle:hover{ background: rgba(255,255,255,0.12); }
+.pw-toggle i{ font-size: 1.2rem; pointer-events: none; }
+
+/* Subtle glassy card look for auth forms */
+.form-box{
+   border: 1px solid rgba(255,255,255,0.12);
+   box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+   border-radius: 16px;
 }
 .two label a{
     text-decoration: none;
