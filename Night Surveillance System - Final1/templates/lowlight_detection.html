@@ -180,7 +180,7 @@
              
              <div class="spinner" id="spinner"></div>
              
-             <button class="btn-upload" id="upload-btn" style="display: none;" disabled>
+             <button class="btn-upload" id="upload-btn" disabled>
                <span class="material-symbols-sharp">send</span> Analyze Image
              </button>
            </div>
@@ -281,7 +281,6 @@
          return;
        }
        selectedFile = file;
-       uploadBtn.style.display = 'inline-block';
        uploadBtn.disabled = false;
        uploadArea.innerHTML = `
          <span class="material-symbols-sharp" style="font-size: 3rem; color: var(--color-success);">check_circle</span>

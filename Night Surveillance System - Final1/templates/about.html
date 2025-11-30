@@ -48,7 +48,10 @@
 
 <!-- Footer -->
 <footer>
-    <p>&copy; 2024 Night Shield. All rights reserved.</p>
+    <p>&copy; <span id="year"></span> Night Shield. All rights reserved.</p>
+    <script>
+        document.getElementById('year').textContent = new Date().getFullYear();
+    </script>
 </footer>
 
 <!-- Link your JavaScript file -->

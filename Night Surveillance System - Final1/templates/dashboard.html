@@ -81,14 +81,20 @@
              <span style="opacity:.8;">Welcome, {{ session.get('firstname','User') }}</span>
            </div>
 
+        <div class="camera-controls" style="margin: 1rem 0; text-align: center;">
+          <button id="toggle-camera-btn" class="btn-primary">
+            <span class="material-symbols-sharp">videocam</span>
+            <span id="camera-btn-text">Start Camera</span>
+          </button>
+        </div>
         
-        <div id="video-container" class="card">
+        <div id="video-container" class="card" style="display: none;">
           <div class="card-header">
             <span class="material-symbols-sharp">videocam</span>
             <h3>Live Video</h3>
           </div>
           <div class="card-body">
-            <img id="video-stream" src="{{ url_for('video_feed') }}" alt="Video Stream">
+            <img id="video-stream" src="" alt="Video Stream">
           </div>
         </div>
 
@@ -132,10 +138,10 @@
               <div class="middle">
                 <div class="left">
                   <h3>Cameras</h3>
-                  <h1>{{ cam_count }}</h1>
+                  <h1>{{ cam_count or 0 }}</h1>
                 </div>
               </div>
-              <small>Total configured</small>
+              <small class="text-muted">Total configured</small>
             </div>
 
             <div class="stat card">
@@ -143,10 +149,10 @@
               <div class="middle">
                 <div class="left">
                   <h3>Datasets</h3>
-                  <h1>{{ dataset_count }}</h1>
+                  <h1>{{ dataset_count or 0 }}</h1>
                 </div>
               </div>
-              <small>Available</small>
+              <small class="text-muted">Available</small>
             </div>
 
             <div class="stat card">
@@ -154,10 +160,10 @@
               <div class="middle">
                 <div class="left">
                   <h3>Detections</h3>
-                  <h1>{{ detections_count }}</h1>
+                  <h1>{{ detections_count or 0 }}</h1>
                 </div>
               </div>
-              <small>All time</small>
+              <small class="text-muted">All time</small>
             </div>
 
             <div class="stat card">
@@ -165,10 +171,10 @@
               <div class="middle">
                 <div class="left">
                   <h3>Events</h3>
-                  <h1>{{ events_count }}</h1>
+                  <h1>{{ events_count or 0 }}</h1>
                 </div>
               </div>
-              <small>All time</small>
+              <small class="text-muted">All time</small>
             </div>
         </div>
          
@@ -181,11 +187,36 @@
    </div>
 
      <!-- Footer -->
-     <footer>
-      <p>&copy; 2024 Night Shield. All rights reserved.</p>
-  </footer>
+   <footer>
+    <p>&copy; <span id="year"></span> Night Shield. All rights reserved.</p>
+    <script>
+        document.getElementById('year').textContent = new Date().getFullYear();
+    </script>
+</footer>
 
    <script src="{{ url_for('static', filename='js/dashboard-script.js')}}"></script>
+   <script>
+     // Camera toggle functionality
+     const toggleCameraBtn = document.getElementById('toggle-camera-btn');
+     const videoContainer = document.getElementById('video-container');
+     const videoStream = document.getElementById('video-stream');
+     const cameraBtnText = document.getElementById('camera-btn-text');
+     let cameraActive = false;
+
+     toggleCameraBtn.addEventListener('click', function() {
+       cameraActive = !cameraActive;
+       
+       if (cameraActive) {
+         videoContainer.style.display = 'block';
+         videoStream.src = "{{ url_for('video_feed') }}";
+         cameraBtnText.textContent = 'Stop Camera';
+       } else {
+         videoContainer.style.display = 'none';
+         videoStream.src = '';
+         cameraBtnText.textContent = 'Start Camera';
+       }
+     });
+   </script>
 </body>
 </html>
 

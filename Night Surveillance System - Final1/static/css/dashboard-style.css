@@ -285,9 +285,15 @@ b{
 #video-stream{ width:100%; max-height:540px; object-fit:contain; border-radius: .8rem; }
 
 /* Stat cards match insights styling */
-.stat span{ background: coral; padding:.5rem; border-radius:50%; color:#fff; font-size:2rem; }
+.stat span{ background: var(--clr-primary); padding:.5rem; border-radius:50%; color:#fff; font-size:2rem; }
 .stat.card{ background: linear-gradient(145deg, rgba(255,255,255,0.9), rgba(255,255,255,0.75)); }
 .dark-theme-variables .stat.card{ background: linear-gradient(145deg, rgba(17,24,39,0.9), rgba(31,41,55,0.75)); }
+
+/* Individual stat card icon colors */
+.stat:nth-child(1) span { background: var(--clr-primary); } /* Cameras - blue */
+.stat:nth-child(2) span { background: var(--clr-warning); } /* Datasets - orange */
+.stat:nth-child(3) span { background: var(--clr-success); } /* Detections - green */
+.stat:nth-child(4) span { background: var(--clr-danger); } /* Events - red */
 
 .right .insights > div:hover{
   box-shadow: none;
@@ -316,6 +322,34 @@ main .insights > div.income span{
   font-size: 1.6rem;
 }
 
+/* Stats card text styling */
+.stat h3 {
+  font-size: 0.9rem;
+  margin: 0.5rem 0 0.25rem 0;
+  color: var(--clr-dark);
+  opacity: 0.8;
+}
+
+.stat h1 {
+  font-size: 2rem;
+  margin: 0.25rem 0;
+  color: var(--clr-dark);
+  font-weight: 700;
+}
+
+.stat small {
+  font-size: 0.75rem;
+  color: var(--clr-info-dark);
+  opacity: 0.7;
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.text-muted {
+  color: var(--clr-info-dark);
+  opacity: 0.7;
+}
+
 .right h1{
   color: var(--clr-dark);
 }
@@ -327,12 +361,6 @@ main .insights > div.income span{
 }
 .right .insights p{
   color: var(--clr-dark);
-}
-.right .insights h3{
-  
-    color: var(--clr-dark);
-  
-  
 }
 
 .right .insights .progress{
@@ -618,14 +646,356 @@ MEDIA QUERY PHONE
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 100vh;
-  
+  padding: 1.5rem;
+  min-height: 400px;
+  max-height: 700px;
+  width: 100%;
 }
 #video-stream {
-  width: auto;
-  max-height: 80vh;
-  border: 2px solid #333;
-  border-radius: 10px;
- 
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: 600px;
+  border: 2px solid var(--clr-primary);
+  border-radius: var(--border-radius-2);
+  object-fit: contain;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
 }
+
+/* ===================================
+   BUTTON STYLES FOR LIGHT THEME
+   =================================== */
+
+/* Primary Button */
+.btn-primary,
+button.btn-primary {
+  background: var(--clr-primary);
+  color: white;
+  padding: 0.8rem 1.5rem;
+  border: none;
+  border-radius: var(--border-radius-1);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 12px rgba(115, 128, 236, 0.3);
+}
+
+.btn-primary:hover {
+  background: var(--clr-primary-variant);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(115, 128, 236, 0.4);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(115, 128, 236, 0.3);
+}
+
+/* Light Theme Button Improvements */
+body:not(.dark-theme-variables) .btn-primary,
+body:not(.dark-theme-variables) button.btn-primary {
+  background: linear-gradient(135deg, #7380ec 0%, #5a67d8 100%);
+  color: white;
+  border: 2px solid transparent;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+body:not(.dark-theme-variables) .btn-primary:hover {
+  background: linear-gradient(135deg, #5a67d8 0%, #4c56c4 100%);
+  border-color: #4c56c4;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(115, 128, 236, 0.4);
+}
+
+/* Secondary Button */
+.btn-secondary {
+  background: var(--clr-info-light);
+  color: var(--clr-dark);
+  padding: 0.8rem 1.5rem;
+  border: 2px solid var(--clr-info-dark);
+  border-radius: var(--border-radius-1);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+body:not(.dark-theme-variables) .btn-secondary {
+  background: white;
+  color: var(--clr-primary);
+  border: 2px solid var(--clr-primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+body:not(.dark-theme-variables) .btn-secondary:hover {
+  background: var(--clr-primary);
+  color: white;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(115, 128, 236, 0.3);
+}
+
+/* Success Button */
+.btn-success {
+  background: var(--clr-success);
+  color: white;
+  padding: 0.8rem 1.5rem;
+  border: none;
+  border-radius: var(--border-radius-1);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+body:not(.dark-theme-variables) .btn-success {
+  background: linear-gradient(135deg, #41f1b6 0%, #2dd4a4 100%);
+  box-shadow: 0 4px 12px rgba(65, 241, 182, 0.3);
+}
+
+body:not(.dark-theme-variables) .btn-success:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(65, 241, 182, 0.4);
+}
+
+/* Danger Button */
+.btn-danger {
+  background: var(--clr-danger);
+  color: white;
+  padding: 0.8rem 1.5rem;
+  border: none;
+  border-radius: var(--border-radius-1);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+body:not(.dark-theme-variables) .btn-danger {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+
+body:not(.dark-theme-variables) .btn-danger:hover {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+}
+
+/* Camera Control Button */
+#toggle-camera-btn {
+  color: white;
+  padding: 0.8rem 1.5rem;
+  border: none;
+  border-radius: var(--border-radius-1);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 12px rgba(115, 128, 236, 0.3);
+}
+
+#toggle-camera-btn:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(115, 128, 236, 0.4);
+}
+
+/* Camera Controls Container */
+.camera-controls {
+  margin: 1rem 0;
+  text-align: center;
+  padding: 1rem;
+  background: var(--clr-white);
+  border-radius: var(--border-radius-2);
+  box-shadow: var(--box-shadow);
+}
+
+body:not(.dark-theme-variables) .camera-controls {
+  background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.95) 100%);
+  border: 1px solid rgba(115, 128, 236, 0.1);
+}
+
+/* Upload Button */
+.btn-upload {
+  background: var(--clr-primary);
+  color: white;
+  padding: 0.8rem 1.5rem;
+  border: none;
+  border-radius: var(--border-radius-1);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.3s ease;
+  margin-top: 1rem;
+}
+
+body:not(.dark-theme-variables) .btn-upload {
+  background: linear-gradient(135deg, #7380ec 0%, #5a67d8 100%);
+  box-shadow: 0 4px 12px rgba(115, 128, 236, 0.3);
+}
+
+body:not(.dark-theme-variables) .btn-upload:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(115, 128, 236, 0.4);
+}
+
+.btn-upload:disabled {
+  background: var(--clr-info-light);
+  cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
+}
+
+body:not(.dark-theme-variables) .btn-upload:disabled {
+  background: #e2e8f0;
+  color: #94a3b8;
+  box-shadow: none;
+}
+
+/* ===================================
+   LIGHT THEME IMPROVEMENTS
+   =================================== */
+
+/* Enhanced Card Styles for Light Theme */
+body:not(.dark-theme-variables) .card {
+  background: white;
+  border: 1px solid rgba(115, 128, 236, 0.1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+}
+
+body:not(.dark-theme-variables) .card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  border-color: rgba(115, 128, 236, 0.2);
+}
+
+/* Sidebar in Light Theme */
+body:not(.dark-theme-variables) aside {
+  background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(248,250,252,0.98) 100%);
+  border-right: 1px solid rgba(115, 128, 236, 0.1);
+}
+
+body:not(.dark-theme-variables) aside .sidebar a {
+  color: var(--clr-dark);
+}
+
+body:not(.dark-theme-variables) aside .sidebar a:hover {
+  background: rgba(115, 128, 236, 0.08);
+}
+
+body:not(.dark-theme-variables) aside .sidebar a.active {
+  background: linear-gradient(90deg, rgba(115, 128, 236, 0.15) 0%, rgba(115, 128, 236, 0.08) 100%);
+  border-left-color: var(--clr-primary);
+}
+
+/* Right Section in Light Theme */
+body:not(.dark-theme-variables) .right {
+  background: transparent;
+}
+
+body:not(.dark-theme-variables) .right .top {
+  background: white;
+  border-radius: var(--border-radius-2);
+  padding: 1rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* Insights/Stats Cards */
+body:not(.dark-theme-variables) .right .insights > div {
+  background: linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(248,250,252,0.95) 100%);
+  border: 1px solid rgba(115, 128, 236, 0.1);
+}
+
+body:not(.dark-theme-variables) .right .insights > div:hover {
+  border-color: rgba(115, 128, 236, 0.3);
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(115, 128, 236, 0.15);
+}
+
+/* Input Fields in Light Theme */
+body:not(.dark-theme-variables) input {
+  background: white;
+  border: 2px solid var(--clr-info-light);
+  color: var(--clr-dark);
+  padding: 0.5rem;
+  border-radius: var(--border-radius-1);
+}
+
+body:not(.dark-theme-variables) input:focus {
+  border-color: var(--clr-primary);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(115, 128, 236, 0.1);
+}
+
+/* Date Picker in Light Theme */
+body:not(.dark-theme-variables) main .date {
+  background: white;
+  border: 1px solid rgba(115, 128, 236, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* Profile Section */
+body:not(.dark-theme-variables) .profile {
+  padding: 0.5rem;
+}
+
+body:not(.dark-theme-variables) .profile .info p {
+  color: var(--clr-dark);
+}
+
+/* Upload Area in Light Theme */
+body:not(.dark-theme-variables) .upload-area {
+  background: linear-gradient(135deg, rgba(248,250,252,0.9) 0%, rgba(255,255,255,0.9) 100%);
+  border: 3px dashed rgba(115, 128, 236, 0.3);
+}
+
+body:not(.dark-theme-variables) .upload-area:hover {
+  border-color: var(--clr-primary);
+  background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.95) 100%);
+}
+
+body:not(.dark-theme-variables) .upload-area.dragging {
+  border-color: var(--clr-success);
+  background: linear-gradient(135deg, rgba(65, 241, 182, 0.1) 0%, rgba(255,255,255,0.95) 100%);
+}
+
+/* Video Container */
+body:not(.dark-theme-variables) #video-container {
+  background: white;
+  border: 1px solid rgba(115, 128, 236, 0.1);
+}
+
+body:not(.dark-theme-variables) #video-stream {
+  border-color: rgba(115, 128, 236, 0.2);
+}
+
+/* Alerts in Light Theme */
+body:not(.dark-theme-variables) .alert-success {
+  background: linear-gradient(135deg, #41f1b6 0%, #2dd4a4 100%);
+  color: white;
+  box-shadow: 0 4px 12px rgba(65, 241, 182, 0.3);
+}
+
+body:not(.dark-theme-variables) .alert-error {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+
+/* Footer in Light Theme */
+body:not(.dark-theme-variables) footer {
+  background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.95) 100%);
+  border-top: 1px solid rgba(115, 128, 236, 0.1);
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+}
+
 

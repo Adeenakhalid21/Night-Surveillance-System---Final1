@@ -147,9 +147,12 @@
    </div>
 
      <!-- Footer -->
-     <footer>
-      <p>&copy; 2024 Night Shield. All rights reserved.</p>
-  </footer>
+   <footer>
+    <p>&copy; <span id="year"></span> Night Shield. All rights reserved.</p>
+    <script>
+        document.getElementById('year').textContent = new Date().getFullYear();
+    </script>
+</footer>
 
    <script src="{{ url_for('static', filename='js/dashboard-script.js')}}"></script>
 </body>
