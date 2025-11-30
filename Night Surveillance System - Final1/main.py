@@ -2,7 +2,6 @@ import cv2
 from flask import Flask, render_template, Response, request, jsonify, redirect, url_for, session
 import sqlite3
 import re, os
-from ultralytics import YOLO
 from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
@@ -16,11 +15,28 @@ import time
 # Load environment variables from .env if present
 load_dotenv()
 
-# Initialize YOLOv8 model
+# Lazy-load YOLO to avoid import issues blocking app startup
 weights_path = os.getenv("YOLO_WEIGHTS", "runs/detect/coco_sample_pseudo/weights/best.pt")
 if not os.path.exists(weights_path):
     weights_path = "yolov8n.pt"
-model = YOLO(weights_path) # yolov8n, yolov8m, yolov8l, yolov8x
+model = None
+
+def get_model():
+    global model
+    if model is not None:
+        return model
+    try:
+        from ultralytics import YOLO
+        print("[YOLO] Loading model...", flush=True)
+        model = YOLO(weights_path)
+        print("[YOLO] Model ready", flush=True)
+        return model
+    except KeyboardInterrupt:
+        print("[YOLO] Load interrupted")
+        return None
+    except Exception as e:
+        print(f"[YOLO] Failed to load: {e}")
+        return None
 
 # Global variables for motion detection
 prev_frame = None
@@ -29,15 +45,82 @@ motion_detected = False
 # Initialize Flask application
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'static/videos'
+app.config['LOWLIGHT_FOLDER'] = 'static/lowlight_uploads'
 app.config['ALLOWED_EXTENSIONS'] = {'mp4', 'avi', 'mov', 'mkv'}
+app.config['ALLOWED_IMAGES'] = {'jpg', 'jpeg', 'png', 'bmp'}
 
 
 DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
 IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person') or 'person').split(',') if s.strip()}
 ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
 
+# Anomaly detection classes (abnormal behaviors/objects)
+ANOMALY_CLASSES = {s.strip().lower() for s in (os.getenv('ANOMALY_CLASSES', 'person,car,motorcycle,truck') or 'person,car,motorcycle,truck').split(',') if s.strip()}
+ANOMALY_CONF_MIN = float(os.getenv('ANOMALY_CONF_MIN', '0.5'))
+ENABLE_ANOMALY_ALERTS = str(os.getenv('ENABLE_ANOMALY_ALERTS', '1')).strip().lower() in ('1','true','yes','on')
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+def allowed_image(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_IMAGES']
+
+def detect_anomalies(frame, camera_id=1):
+    """Detect anomalies in frame using YOLO and send alerts"""
+    m = get_model()
+    if m is None:
+        return frame, []
+    
+    results = m(frame)
+    anomalies_detected = []
+    
+    for detection in results[0].boxes:
+        x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
+        class_name = m.names[int(cls)]
+        
+        # Check if detected class is in anomaly list
+        if class_name.lower() in ANOMALY_CLASSES and conf >= ANOMALY_CONF_MIN:
+            anomalies_detected.append({
+                'class': class_name,
+                'confidence': conf,
+                'bbox': (x1, y1, x2, y2)
+            })
+            
+            # Draw red bounding box for anomalies
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            label = f"ANOMALY: {class_name} {conf:.2f}"
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            
+            # Save anomaly image
+            os.makedirs('static/images/anomalies', exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}_{class_name}.jpg'
+            try:
+                cv2.imwrite(anomaly_image_path, frame)
+            except Exception as e:
+                print(f"Failed to save anomaly image: {e}")
+            
+            # Log anomaly event
+            try:
+                log_surveillance_event_db({
+                    'camera_id': camera_id,
+                    'event_type': 'anomaly_detected',
+                    'severity': 'high',
+                    'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
+                    'image_path': anomaly_image_path,
+                    'video_path': None
+                })
+            except Exception as e:
+                print(f"Failed to log anomaly: {e}")
+            
+            # Send alert if enabled
+            if ENABLE_ANOMALY_ALERTS:
+                subject = "⚠️ ANOMALY DETECTED!"
+                to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+                body = f"ANOMALY ALERT: {class_name} detected with {conf:.2f} confidence at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\nPlease check the surveillance system immediately."
+                threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path)).start()
+    
+    return frame, anomalies_detected
 
 
 # Function for motion detection
@@ -55,7 +138,10 @@ def motion_detection(frame1, frame2):
 
 def detect_objects_and_classify(frame, camera_id=1):
     # Perform object detection
-    results = model(frame)
+    m = get_model()
+    if m is None:
+        return frame
+    results = m(frame)
 
     # Define the classes you want to detect
     desired_classes = ["person", "car", "motorcycle", "bicycle", "bus", "truck"]
@@ -63,7 +149,7 @@ def detect_objects_and_classify(frame, camera_id=1):
     # Iterate through detected objects
     for detection in results[0].boxes:
         x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
-        class_name = model.names[int(cls)]
+        class_name = m.names[int(cls)]
         label = f"{class_name} {conf:.2f}"
 
         # Draw bounding box and label on the frame
@@ -73,14 +159,13 @@ def detect_objects_and_classify(frame, camera_id=1):
         # Filter out classes not in desired_classes
         if class_name in desired_classes:
             os.makedirs('static/images', exist_ok=True)
-            # Choose pathing depending on whether we store per-detection artifacts
-            if not DISABLE_DETECTION_DB:
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                detection_image_path = f'static/images/detection_{timestamp}_{class_name}.jpg'
+            # Always save a timestamped snapshot to static/images (ignored by git)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            detection_image_path = f'static/images/detection_{timestamp}_{class_name}.jpg'
+            try:
                 cv2.imwrite(detection_image_path, frame)
-            else:
-                detection_image_path = 'static/images/detected_frame.jpg'
-                cv2.imwrite(detection_image_path, frame)
+            except Exception as e:
+                print(f"Failed to save detection image: {e}")
 
             # Optionally store detection rows (disabled by default)
             if not DISABLE_DETECTION_DB:
@@ -106,9 +191,12 @@ def detect_objects_and_classify(frame, camera_id=1):
                     'image_path': detection_image_path
                 })
 
-                # Keep the original detected frame for email (overwrites single file)
+                # Keep the last detection as a stable filename for quick email attach
                 att = 'static/images/detected_frame.jpg'
-                cv2.imwrite(att, frame)
+                try:
+                    cv2.imwrite(att, frame)
+                except Exception:
+                    pass
 
                 # Send email alert in a separate thread
                 subject = "Motion Detected!"
@@ -244,6 +332,10 @@ def video_stream(source, stop_event):
                     enhanced_frame = frame
                 try:
                     output_frame = detect_objects_and_classify(enhanced_frame)
+                    # Also check for anomalies
+                    output_frame, anomalies = detect_anomalies(output_frame)
+                    if anomalies and ENABLE_ANOMALY_ALERTS:
+                        print(f"[ANOMALY] Detected {len(anomalies)} anomalies: {[a['class'] for a in anomalies]}")
                 except Exception as e:
                     print(f"Detection error: {e}")
                     output_frame = enhanced_frame
@@ -331,7 +423,8 @@ class PGConn:
                 s = re.sub(p, rpl, s)
             return s
         sql_ps = _quote_user_table(sql_ps)
-        cur = self._conn.cursor()
+        import psycopg2.extras
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(sql_ps, params or ())
         return PGCursor(cur)
     def commit(self):
@@ -348,7 +441,7 @@ def get_db_connection():
             raise RuntimeError('DATABASE_URL/SUPABASE_DB_URL not set')
         if 'sslmode=' not in dsn:
             dsn = dsn + ('&' if '?' in dsn else '?') + 'sslmode=require'
-        conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.DictCursor)
+        conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
         return PGConn(conn)
     else:
         conn = sqlite3.connect(DATABASE)
@@ -448,7 +541,19 @@ def init_db():
     conn.close()
 
 # Initialize database when app starts
-if not USE_PG:
+if USE_PG:
+    print('[DB] Using Supabase Postgres connection.')
+    # Simple connectivity test
+    try:
+        c = get_db_connection()
+        test_row = c.execute('SELECT 1 as ok').fetchone()
+        if test_row:
+            print(f"[DB] Postgres connectivity OK: {test_row}")
+            c.close()
+    except Exception as e:
+        print(f"[DB] Postgres connectivity test failed: {e}")
+else:
+    print('[DB] Using local SQLite database night_surveillance.db')
     init_db()
 
 # Signup API
@@ -545,6 +650,79 @@ def login():
             conn.close()
     return render_template('home.html', mesage=mesage)
 
+
+@app.route('/lowlight_detection', methods=['GET', 'POST'])
+def lowlight_detection():
+    if request.method == 'POST':
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided'}), 400
+        
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if file and allowed_image(file.filename):
+            # Create upload directory
+            os.makedirs(app.config['LOWLIGHT_FOLDER'], exist_ok=True)
+            
+            # Save uploaded file
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"lowlight_{timestamp}_{file.filename}"
+            filepath = os.path.join(app.config['LOWLIGHT_FOLDER'], filename)
+            file.save(filepath)
+            
+            # Read and enhance the image
+            img = cv2.imread(filepath)
+            if img is None:
+                return jsonify({'error': 'Failed to read image'}), 500
+            
+            # Enhance low-light image
+            try:
+                enhanced_img = enhance_image(img)
+            except Exception as e:
+                print(f"Enhancement failed: {e}")
+                enhanced_img = img
+            
+            # Detect objects in enhanced image
+            m = get_model()
+            if m is None:
+                return jsonify({'error': 'Model not loaded'}), 500
+            
+            results = m(enhanced_img)
+            detections = []
+            
+            # Draw detections on image
+            for detection in results[0].boxes:
+                x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
+                class_name = m.names[int(cls)]
+                
+                detections.append({
+                    'class': class_name,
+                    'confidence': float(conf),
+                    'bbox': [int(x1), int(y1), int(x2), int(y2)]
+                })
+                
+                # Draw bounding box
+                cv2.rectangle(enhanced_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{class_name} {conf:.2f}"
+                cv2.putText(enhanced_img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Save result image
+            result_filename = f"result_{timestamp}.jpg"
+            result_path = os.path.join(app.config['LOWLIGHT_FOLDER'], result_filename)
+            cv2.imwrite(result_path, enhanced_img)
+            
+            return jsonify({
+                'success': True,
+                'detections': detections,
+                'result_image': f"/static/lowlight_uploads/{result_filename}",
+                'original_image': f"/static/lowlight_uploads/{filename}"
+            })
+        else:
+            return jsonify({'error': 'Invalid file type. Please upload JPG, PNG, or BMP'}), 400
+    
+    # GET request - render the upload page
+    return render_template('lowlight_detection.html')
 
 @app.route('/dashboard')
 def dashboard():
