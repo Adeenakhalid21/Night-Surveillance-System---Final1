@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register a folder of images as a dataset in the local SQLite DB.
+r"""Register a folder of images as a dataset in the local SQLite DB.
 
 Usage (PowerShell from repo root):
     # Register COCO sample (2000 images)
