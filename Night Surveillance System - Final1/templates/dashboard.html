@@ -9,6 +9,9 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css')}}">
 </head>
 <body>
+   <!-- Anomaly Alert Notifications -->
+   <div id="alert-container"></div>
+   
    <div class="container">
       <aside>
            
@@ -38,6 +41,10 @@
           <a href="/lowlight_detection">
            <span class="material-symbols-sharp">nightlight </span>
            <h3>Low-Light Detection</h3>
+        </a>
+          <a href="/image_enhancement">
+           <span class="material-symbols-sharp">auto_fix_high </span>
+           <h3>Image Enhancement</h3>
         </a>
           <a href="/datasets">
            <span class="material-symbols-sharp">dataset </span>
@@ -202,6 +209,7 @@
      const videoStream = document.getElementById('video-stream');
      const cameraBtnText = document.getElementById('camera-btn-text');
      let cameraActive = false;
+     let eventSource = null;
 
      toggleCameraBtn.addEventListener('click', function() {
        cameraActive = !cameraActive;
@@ -210,12 +218,97 @@
          videoContainer.style.display = 'block';
          videoStream.src = "{{ url_for('video_feed') }}";
          cameraBtnText.textContent = 'Stop Camera';
+         
+         // Start listening for anomaly alerts
+         startAnomalyAlerts();
        } else {
          videoContainer.style.display = 'none';
          videoStream.src = '';
          cameraBtnText.textContent = 'Start Camera';
+         
+         // Stop listening for anomaly alerts
+         if (eventSource) {
+           eventSource.close();
+           eventSource = null;
+         }
        }
      });
+     
+     // Anomaly Alert System
+     function startAnomalyAlerts() {
+       if (eventSource) return; // Already connected
+       
+       eventSource = new EventSource('{{ url_for("anomaly_alerts") }}');
+       
+       eventSource.onmessage = function(event) {
+         const data = JSON.parse(event.data);
+         showAnomalyAlert(data.class, data.confidence);
+       };
+       
+       eventSource.onerror = function(error) {
+         console.error('SSE Error:', error);
+       };
+     }
+     
+     function showAnomalyAlert(className, confidence) {
+       const alertContainer = document.getElementById('alert-container');
+       
+       // Create alert element
+       const alert = document.createElement('div');
+       alert.className = 'anomaly-alert';
+       alert.innerHTML = `
+         <div class="alert-icon">
+           <span class="material-symbols-sharp">warning</span>
+         </div>
+         <div class="alert-content">
+           <h4>⚠️ ANOMALY DETECTED</h4>
+           <p><strong>${className.toUpperCase()}</strong> detected with ${(confidence * 100).toFixed(0)}% confidence</p>
+           <small>${new Date().toLocaleTimeString()}</small>
+         </div>
+       `;
+       
+       // Add to container
+       alertContainer.appendChild(alert);
+       
+       // Play sound (optional)
+       playAlertSound();
+       
+       // Animate in
+       setTimeout(() => {
+         alert.classList.add('show');
+       }, 10);
+       
+       // Remove after 5 seconds
+       setTimeout(() => {
+         alert.classList.remove('show');
+         setTimeout(() => {
+           alert.remove();
+         }, 300);
+       }, 5000);
+     }
+     
+     function playAlertSound() {
+       // Create short beep sound
+       try {
+         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+         const oscillator = audioContext.createOscillator();
+         const gainNode = audioContext.createGain();
+         
+         oscillator.connect(gainNode);
+         gainNode.connect(audioContext.destination);
+         
+         oscillator.frequency.value = 800; // Frequency in Hz
+         oscillator.type = 'sine';
+         
+         gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+         gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+         
+         oscillator.start(audioContext.currentTime);
+         oscillator.stop(audioContext.currentTime + 0.2);
+       } catch (e) {
+         console.log('Audio not supported');
+       }
+     }
    </script>
 </body>
 </html>

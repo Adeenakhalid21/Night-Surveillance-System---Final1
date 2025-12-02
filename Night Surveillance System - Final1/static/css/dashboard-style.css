@@ -998,4 +998,163 @@ body:not(.dark-theme-variables) footer {
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
 }
 
+/* ===================================
+   ANOMALY ALERT NOTIFICATIONS
+   =================================== */
+
+/* Alert Container - Fixed position for popups */
+#alert-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 10000;
+  max-width: 400px;
+  pointer-events: none;
+}
+
+/* Individual Alert Popup */
+.anomaly-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+  padding: 1.2rem;
+  border-radius: var(--border-radius-2);
+  margin-bottom: 1rem;
+  box-shadow: 0 8px 32px rgba(239, 68, 68, 0.5);
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateX(400px);
+  transition: all 0.3s ease-out;
+  backdrop-filter: blur(10px);
+  animation: pulse-border 2s infinite;
+}
+
+/* Show animation */
+.anomaly-alert.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* Pulse border animation */
+@keyframes pulse-border {
+  0%, 100% {
+    box-shadow: 0 8px 32px rgba(239, 68, 68, 0.5);
+  }
+  50% {
+    box-shadow: 0 8px 48px rgba(239, 68, 68, 0.8), 0 0 20px rgba(239, 68, 68, 0.6);
+  }
+}
+
+/* Alert Icon */
+.anomaly-alert .alert-icon {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 0.8rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: shake 0.5s infinite;
+}
+
+.anomaly-alert .alert-icon span {
+  font-size: 2rem;
+  color: white;
+}
+
+/* Shake animation for icon */
+@keyframes shake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-10deg); }
+  75% { transform: rotate(10deg); }
+}
+
+/* Alert Content */
+.anomaly-alert .alert-content {
+  flex: 1;
+}
+
+.anomaly-alert .alert-content h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: white;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  letter-spacing: 0.5px;
+}
+
+.anomaly-alert .alert-content p {
+  margin: 0 0 0.3rem 0;
+  font-size: 0.95rem;
+  color: rgba(255, 255, 255, 0.95);
+  line-height: 1.4;
+}
+
+.anomaly-alert .alert-content strong {
+  font-weight: 700;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.anomaly-alert .alert-content small {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.7);
+  font-style: italic;
+}
+
+/* Dark Theme Alert Adjustments */
+.dark-theme-variables .anomaly-alert {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Mobile Responsiveness for Alerts */
+@media (max-width: 768px) {
+  #alert-container {
+    top: 10px;
+    right: 10px;
+    left: 10px;
+    max-width: none;
+  }
+  
+  .anomaly-alert {
+    padding: 1rem;
+  }
+  
+  .anomaly-alert .alert-icon span {
+    font-size: 1.5rem;
+  }
+  
+  .anomaly-alert .alert-content h4 {
+    font-size: 1rem;
+  }
+  
+  .anomaly-alert .alert-content p {
+    font-size: 0.85rem;
+  }
+}
+
+/* Success Alert Variant (for testing or other notifications) */
+.success-alert {
+  background: linear-gradient(135deg, #41f1b6 0%, #2dd4a4 100%);
+  box-shadow: 0 8px 32px rgba(65, 241, 182, 0.5);
+}
+
+.success-alert .alert-icon {
+  animation: none;
+}
+
+/* Info Alert Variant */
+.info-alert {
+  background: linear-gradient(135deg, #7380ec 0%, #5a67d8 100%);
+  box-shadow: 0 8px 32px rgba(115, 128, 236, 0.5);
+}
+
+.info-alert .alert-icon {
+  animation: none;
+}
+
 

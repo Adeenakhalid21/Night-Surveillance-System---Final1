@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 
 def enhance_image(image):
     """Light enhancement while preserving color.
@@ -23,8 +24,7 @@ def enhance_image(image):
     # Gamma correction (mild) using LUT for speed
     gamma = 1.15
     inv_gamma = 1.0 / gamma
-    lut = ( ( (i / 255.0) ** inv_gamma ) * 255 for i in range(256) )
-    lut = bytearray(int(v) for v in lut)
+    lut = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)], dtype=np.uint8)
     l_gamma = cv2.LUT(l_eq, lut)
 
     lab_enhanced = cv2.merge((l_gamma, a, b))

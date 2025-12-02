@@ -42,10 +42,18 @@ def get_model():
 prev_frame = None
 motion_detected = False
 
+# Global variable for anomaly alerts
+recent_anomalies = []
+anomalies_lock = threading.Lock()
+
 # Initialize Flask application
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'static/videos'
-app.config['LOWLIGHT_FOLDER'] = 'static/lowlight_uploads'
+
+# Get the directory where main.py is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'static', 'videos')
+app.config['LOWLIGHT_FOLDER'] = os.path.join(BASE_DIR, 'static', 'lowlight_uploads')
 app.config['ALLOWED_EXTENSIONS'] = {'mp4', 'avi', 'mov', 'mkv'}
 app.config['ALLOWED_IMAGES'] = {'jpg', 'jpeg', 'png', 'bmp'}
 
@@ -336,6 +344,17 @@ def video_stream(source, stop_event):
                     output_frame, anomalies = detect_anomalies(output_frame)
                     if anomalies and ENABLE_ANOMALY_ALERTS:
                         print(f"[ANOMALY] Detected {len(anomalies)} anomalies: {[a['class'] for a in anomalies]}")
+                    # Add to global anomaly list for SSE
+                    with anomalies_lock:
+                        for anomaly in anomalies:
+                            recent_anomalies.append({
+                                'class': anomaly['class'],
+                                'confidence': anomaly['confidence'],
+                                'timestamp': time.time()
+                            })
+                        # Keep only last 10 anomalies
+                        if len(recent_anomalies) > 10:
+                            recent_anomalies.pop(0)
                 except Exception as e:
                     print(f"Detection error: {e}")
                     output_frame = enhanced_frame
@@ -724,6 +743,75 @@ def lowlight_detection():
     # GET request - render the upload page
     return render_template('lowlight_detection.html')
 
+@app.route('/image_enhancement', methods=['GET', 'POST'])
+def image_enhancement():
+    """
+    Image Enhancement for Low-Light Photos
+    Enhances images without YOLO detection - only applies enhancement algorithms
+    """
+    if request.method == 'POST':
+        print("[IMAGE_ENHANCEMENT] POST request received", flush=True)
+        
+        if 'image' not in request.files:
+            print("[IMAGE_ENHANCEMENT] No image in request", flush=True)
+            return jsonify({'error': 'No image file provided'}), 400
+        
+        file = request.files['image']
+        if file.filename == '':
+            print("[IMAGE_ENHANCEMENT] Empty filename", flush=True)
+            return jsonify({'error': 'No file selected'}), 400
+        
+        print(f"[IMAGE_ENHANCEMENT] File received: {file.filename}", flush=True)
+        
+        if file and allowed_image(file.filename):
+            # Create upload directory
+            os.makedirs(app.config['LOWLIGHT_FOLDER'], exist_ok=True)
+            
+            # Save uploaded file with timestamp
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"original_{timestamp}_{file.filename}"
+            filepath = os.path.join(app.config['LOWLIGHT_FOLDER'], filename)
+            file.save(filepath)
+            print(f"[IMAGE_ENHANCEMENT] Original saved: {filepath}", flush=True)
+            
+            # Read the image
+            img = cv2.imread(filepath)
+            if img is None:
+                print("[IMAGE_ENHANCEMENT] Failed to read image with cv2", flush=True)
+                return jsonify({'error': 'Failed to read image'}), 500
+            
+            print(f"[IMAGE_ENHANCEMENT] Image read: shape={img.shape}", flush=True)
+            
+            # Enhance the image using enhancement module
+            try:
+                enhanced_img = enhance_image(img)
+                print("[IMAGE_ENHANCEMENT] Enhancement successful", flush=True)
+            except Exception as e:
+                print(f"[IMAGE_ENHANCEMENT] Enhancement failed: {e}", flush=True)
+                return jsonify({'error': f'Enhancement failed: {str(e)}'}), 500
+            
+            # Save enhanced image
+            enhanced_filename = f"enhanced_{timestamp}_{file.filename}"
+            enhanced_path = os.path.join(app.config['LOWLIGHT_FOLDER'], enhanced_filename)
+            success = cv2.imwrite(enhanced_path, enhanced_img)
+            print(f"[IMAGE_ENHANCEMENT] Enhanced saved: {enhanced_path}, success={success}", flush=True)
+            
+            # Return paths to both images - use url_for for proper URL generation
+            # or construct URLs with forward slashes
+            response_data = {
+                'success': True,
+                'original': f"/static/lowlight_uploads/{filename}".replace('\\', '/'),
+                'enhanced': f"/static/lowlight_uploads/{enhanced_filename}".replace('\\', '/')
+            }
+            print(f"[IMAGE_ENHANCEMENT] Returning: {response_data}", flush=True)
+            return jsonify(response_data)
+        else:
+            print(f"[IMAGE_ENHANCEMENT] Invalid file type: {file.filename}", flush=True)
+            return jsonify({'error': 'Invalid file type. Please upload JPG, PNG, or BMP'}), 400
+    
+    # GET request - render the enhancement page
+    return render_template('image_enhancement.html')
+
 @app.route('/dashboard')
 def dashboard():
     cam_count = dataset_count = detections_count = events_count = 0
@@ -799,6 +887,23 @@ def services():
 def video_feed():
     stop_event = threading.Event()
     return Response(video_stream(0, stop_event), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/anomaly_alerts')
+def anomaly_alerts():
+    """Server-Sent Events endpoint for real-time anomaly alerts"""
+    def generate():
+        last_sent_count = 0
+        while True:
+            with anomalies_lock:
+                if len(recent_anomalies) > last_sent_count:
+                    # Send new anomalies
+                    for i in range(last_sent_count, len(recent_anomalies)):
+                        anomaly = recent_anomalies[i]
+                        yield f"data: {{\"class\": \"{anomaly['class']}\", \"confidence\": {anomaly['confidence']:.2f}, \"timestamp\": {anomaly['timestamp']}}}\n\n"
+                    last_sent_count = len(recent_anomalies)
+            time.sleep(0.5)  # Check every 500ms
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 # Dataset Management Routes
 @app.route('/datasets')
