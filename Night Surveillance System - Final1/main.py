@@ -59,11 +59,11 @@ app.config['ALLOWED_IMAGES'] = {'jpg', 'jpeg', 'png', 'bmp'}
 
 
 DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
-IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person') or 'person').split(',') if s.strip()}
+IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife') or 'person,backpack,knife').split(',') if s.strip()}
 ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
 
 # Anomaly detection classes (abnormal behaviors/objects)
-ANOMALY_CLASSES = {s.strip().lower() for s in (os.getenv('ANOMALY_CLASSES', 'person,car,motorcycle,truck') or 'person,car,motorcycle,truck').split(',') if s.strip()}
+ANOMALY_CLASSES = {s.strip().lower() for s in (os.getenv('ANOMALY_CLASSES', 'person,car,motorcycle,truck,backpack,knife,gun') or 'person,car,motorcycle,truck,backpack,knife,gun').split(',') if s.strip()}
 ANOMALY_CONF_MIN = float(os.getenv('ANOMALY_CONF_MIN', '0.5'))
 ENABLE_ANOMALY_ALERTS = str(os.getenv('ENABLE_ANOMALY_ALERTS', '1')).strip().lower() in ('1','true','yes','on')
 
@@ -188,6 +188,7 @@ def detect_objects_and_classify(frame, camera_id=1):
                     'image_path': detection_image_path,
                     'dataset_id': 1
                 })
+
 
             # Only log/alert important items
             if class_name.lower() in IMPORTANT_CLASSES and conf >= ALERT_CONF_MIN:

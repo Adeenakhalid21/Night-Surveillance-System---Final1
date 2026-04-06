@@ -164,11 +164,17 @@ header{
 ::-webkit-input-placeholder{
     color: #fff;
 }
-.input-box i{
+.input-box{
     position: relative;
-    top: -35px;
+    margin: 8px 0;
+}
+.input-box i{
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
     left: 17px;
     color: #fff;
+    pointer-events: none;
 }
 .submit{
     font-size: 15px;
@@ -201,10 +207,22 @@ header{
 
 /* Eye toggle button */
 .pw-toggle{
-    position:absolute; right:16px; top:50%; transform: translateY(-50%);
-    background: transparent; border: 0; z-index: 2;
-    color:#fff; cursor:pointer; display:flex; align-items:center; justify-content:center;
-    width:32px; height:32px; border-radius:50%; line-height:1;
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: transparent;
+    border: 0;
+    z-index: 2;
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    line-height: 1;
 }
 .pw-toggle:hover{ background: rgba(255,255,255,0.12); }
 .pw-toggle i{ font-size: 1.2rem; pointer-events: none; }
