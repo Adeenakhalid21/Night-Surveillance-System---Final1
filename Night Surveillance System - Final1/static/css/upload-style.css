@@ -1,49 +1,53 @@
-#video-container {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    height: 100vh;
-    
-  }
-  
-  #video-stream {
-    width: auto;
-    max-height: 80vh;
-    border: 2px solid #333;
-    border-radius: 10px;
-  }
-  
-  #upload-form {
+@import url('design-tokens.css');
+
+main form {
+    width: min(760px, 100%);
+    margin: 1.2rem auto 0;
+    padding: 1.3rem;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    box-shadow: var(--shadow);
     display: flex;
     flex-direction: column;
     align-items: center;
-    margin-top: 2rem;
-  }
-  
-  input[type="file"] {
-    border: 3px solid #333;
-    border-radius: 25px;
-    padding: 1.5rem;
-    font-size: 1.2rem;
-    width: 50%;
-    max-width: 300px;
-    margin-top: 3rem;
-    margin-right: 3rem;
-    margin-left: 3rem;
-    margin-bottom: 3rem;
-  }
-  
-  input[type="submit"] {
-    background-color: #333;
-    color: #ffffff;
-    border: none;
-    border-radius: 25px;
-    padding: 1.5rem 4rem;
-    font-size: 1.2rem;
+    gap: 0.95rem;
+}
+
+main input[type="file"] {
+    width: min(100%, 520px);
+    border: 1px dashed rgba(0, 212, 255, 0.45);
+    border-radius: 12px;
+    padding: 1rem;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+main input[type="submit"] {
+    min-width: 170px;
+    border: 0;
+    border-radius: 10px;
+    padding: 0.78rem 1.2rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #f8fbff;
     cursor: pointer;
-    transition: background-color 0.3s ease;
-  }
-  
-  input[type="submit"]:hover {
-    background-color: #756d6d;
-  }
+    background: linear-gradient(90deg, #00D4FF, #0066FF);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    box-shadow: 0 10px 24px rgba(0, 102, 255, 0.32);
+}
+
+main input[type="submit"]:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 28px rgba(0, 102, 255, 0.4);
+}
+
+main img {
+    margin-top: 1rem;
+    width: min(100%, 760px);
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    box-shadow: var(--shadow);
+}

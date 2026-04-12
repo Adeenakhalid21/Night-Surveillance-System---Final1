@@ -1,74 +1,158 @@
-function myMenuFunction() {
-    var i = document.getElementById("navMenu");
-    if(i.className === "nav-menu") {
-        i.className += " responsive";
+function setupTabs() {
+    const loginTab = document.getElementById('loginTab');
+    const registerTab = document.getElementById('registerTab');
+    const loginPanel = document.getElementById('loginPanel');
+    const registerPanel = document.getElementById('registerPanel');
+
+    if (!loginTab || !registerTab || !loginPanel || !registerPanel) {
+        return;
+    }
+
+    function showLogin() {
+        loginTab.classList.add('active');
+        registerTab.classList.remove('active');
+        loginPanel.classList.remove('hidden');
+        registerPanel.classList.add('hidden');
+    }
+
+    function showRegister() {
+        registerTab.classList.add('active');
+        loginTab.classList.remove('active');
+        registerPanel.classList.remove('hidden');
+        loginPanel.classList.add('hidden');
+    }
+
+    loginTab.addEventListener('click', showLogin);
+    registerTab.addEventListener('click', showRegister);
+
+    const firstRegisterInput = registerPanel.querySelector('input[name="firstname"]');
+    if (firstRegisterInput && firstRegisterInput.value.trim()) {
+        showRegister();
     } else {
-        i.className = "nav-menu";
+        showLogin();
     }
-   }
-    var a = document.getElementById("loginBtn");
-    var b = document.getElementById("registerBtn");
-    var x = document.getElementById("login");
-    var y = document.getElementById("register");
-    
-    function login() {
-        x.style.left = "4px";
-        y.style.right = "-20px";
-        a.className += " white-btn";
-        b.className = "btn";
-        x.style.opacity = 1;
-        y.style.opacity = 0;
-    }
-    function register() {
-        x.style.left = "-510px";
-        y.style.right = "5px";
-        a.className = "btn";
-        b.className += " white-btn";
-        x.style.opacity = 0;
-        y.style.opacity = 1;
+}
+
+
+window.myMenuFunction = function myMenuFunction() {
+    const legacyNav = document.getElementById('navMenu');
+    if (legacyNav && legacyNav.classList.contains('nav-menu')) {
+        legacyNav.classList.toggle('responsive');
+        return;
     }
 
-//function to handle user authentication and redirection
-    function authenticateUser() {
-        // For demonstration purposes, let's assume the username is "user" and password is "password"
-        var username = document.getElementById("usernameField").value;
-        var password = document.getElementById("passwordField").value;
-    
-        // Perform basic validation
-        if (username === "demo" && password === "demo123") {
-            // Redirect to dashboard upon successful login
-            window.location.href = "/dashboard"; // Replace "dashboard.html" with your actual dashboard page
-        } else {
-            alert("Invalid username or password. Please try again."); // Display an error message for invalid credentials
-        }
+    const modernNav = document.getElementById('siteNav');
+    if (modernNav) {
+        modernNav.classList.toggle('open');
     }
-    
-// Show/Hide password toggles
-document.addEventListener('DOMContentLoaded', function() {
-    var loginPw = document.getElementById('passwordField');
-    var regPw = document.getElementById('registerPasswordField');
-    var tLogin = document.getElementById('toggleLoginPw');
-    var tReg = document.getElementById('toggleRegisterPw');
+};
 
-    function wire(btn, input){
-        if (!btn || !input) return;
-        var icon = btn.querySelector('i');
-        function setState(showing){
-            if (!icon) return;
-            icon.classList.toggle('bx-show', !showing);
-            icon.classList.toggle('bx-hide', showing);
-            btn.title = showing ? 'Hide password' : 'Show password';
-            btn.setAttribute('aria-label', btn.title);
+
+function setupPasswordToggles() {
+    const toggles = document.querySelectorAll('.password-toggle');
+    toggles.forEach((toggleBtn) => {
+        const targetId = toggleBtn.getAttribute('data-target');
+        const input = targetId ? document.getElementById(targetId) : null;
+        const icon = toggleBtn.querySelector('i');
+        if (!input || !icon) {
+            return;
         }
-        btn.addEventListener('click', function(){
-            var isHidden = input.getAttribute('type') === 'password';
-            input.setAttribute('type', isHidden ? 'text' : 'password');
-            setState(isHidden);
+
+        toggleBtn.addEventListener('click', () => {
+            const isPassword = input.type === 'password';
+            input.type = isPassword ? 'text' : 'password';
+            icon.classList.toggle('bx-show', !isPassword);
+            icon.classList.toggle('bx-hide', isPassword);
+            toggleBtn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
         });
-        // ensure initial icon state reflects current type
-        setState(false);
+    });
+}
+
+
+function setupMobileNav() {
+    const menuBtn = document.getElementById('mobileMenuBtn');
+    const nav = document.getElementById('siteNav');
+    if (!menuBtn || !nav) {
+        return;
     }
 
-    wire(tLogin, loginPw);
-    wire(tReg, regPw);
+    menuBtn.addEventListener('click', () => {
+        nav.classList.toggle('open');
+    });
+}
+
+
+function setupParticles() {
+    const canvas = document.getElementById('particleCanvas');
+    if (!canvas) {
+        return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    const particles = [];
+    const particleCount = 56;
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+
+    function createParticle() {
+        return {
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            vx: (Math.random() - 0.5) * 0.35,
+            vy: (Math.random() - 0.5) * 0.35,
+            radius: Math.random() * 2 + 0.4,
+            alpha: Math.random() * 0.45 + 0.15,
+        };
+    }
+
+    function initParticles() {
+        particles.length = 0;
+        for (let i = 0; i < particleCount; i += 1) {
+            particles.push(createParticle());
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        for (let i = 0; i < particles.length; i += 1) {
+            const p = particles[i];
+
+            p.x += p.vx;
+            p.y += p.vy;
+
+            if (p.x < 0 || p.x > canvas.width) {
+                p.vx *= -1;
+            }
+            if (p.y < 0 || p.y > canvas.height) {
+                p.vy *= -1;
+            }
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(0, 212, 255, ${p.alpha})`;
+            ctx.fill();
+        }
+
+        requestAnimationFrame(draw);
+    }
+
+    resizeCanvas();
+    initParticles();
+    draw();
+    window.addEventListener('resize', () => {
+        resizeCanvas();
+        initParticles();
+    });
+}
+
+
+document.addEventListener('DOMContentLoaded', () => {
+    setupTabs();
+    setupPasswordToggles();
+    setupMobileNav();
+    setupParticles();
 });

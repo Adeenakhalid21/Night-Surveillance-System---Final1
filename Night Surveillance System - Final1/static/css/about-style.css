@@ -1,166 +1,188 @@
-/* POPPINS FONT */
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&display=swap');
+@import url('design-tokens.css');
 
-*{  
+* {
     margin: 0;
     padding: 0;
     box-sizing: border-box;
-    font-family: 'Poppins', sans-serif;
+    font-family: var(--font);
 }
 
-body{
+body {
     min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background-color: white;
+    color: var(--text-primary);
+    background: radial-gradient(circle at 18% 8%, rgba(0, 212, 255, 0.14), transparent 36%),
+                radial-gradient(circle at 86% 18%, rgba(0, 255, 136, 0.14), transparent 34%),
+                var(--bg-primary);
 }
 
-.nav{
+.nav {
     position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
     display: flex;
+    align-items: center;
     justify-content: space-around;
-    width: 100%;
-    height: 100px;
-    line-height: 100px;
-    background: linear-gradient(rgba(39,39,39, 0.6), transparent);
+    min-height: 78px;
+    padding: 0.4rem 1rem;
+    background: rgba(7, 11, 21, 0.82);
+    border-bottom: 1px solid var(--border-color);
+    backdrop-filter: blur(14px);
     z-index: 100;
 }
-.nav-shield p{
-    color: white;
-    font-size: 25px;
-    font-weight: 600;
+
+.nav-shield p {
+    color: var(--text-primary);
+    font-size: 1.3rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
 }
-.nav-menu ul{
+
+.nav-menu ul {
     display: flex;
+    align-items: center;
+    gap: 0.4rem;
 }
-.nav-menu ul li{
+
+.nav-menu ul li {
     list-style-type: none;
 }
-.nav-menu ul li .link{
+
+.nav-menu ul li .link {
     text-decoration: none;
     font-weight: 500;
-    color: #fff;
-    padding-bottom: 15px;
-    margin: 0 25px;
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 0.45rem 0.8rem;
+    transition: all 0.2s ease;
 }
-.link:hover, .active{
-    border-bottom: 2px solid #fff;
+
+.link:hover,
+.active {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
 }
-.nav-menu-btn{
+
+.nav-menu-btn {
     display: none;
-}    
+}
 
-
-.about-section{
-    background:url("../images/2.jpg") no-repeat left;
-    background-size: 60%;
-    background-color: white;
+.about-section {
+    width: min(1200px, 100% - 2rem);
+    margin: 112px auto 1rem;
+    min-height: calc(100vh - 190px);
     overflow: hidden;
-    padding: 100px 0px;
+    border: 1px solid var(--border-color);
+    border-radius: 18px;
+    box-shadow: var(--shadow);
+    background: linear-gradient(115deg, rgba(0, 0, 0, 0.5), rgba(7, 11, 21, 0.74)),
+                url('../images/2.jpg') no-repeat left center;
+    background-size: cover;
 }
 
-.inner-container{
-    width:55%;
-    float: right;
-    background-color: white;
-    padding: 9px;
+.inner-container {
+    width: 56%;
+    margin-left: auto;
+    min-height: calc(100vh - 220px);
+    background: rgba(7, 11, 21, 0.78);
+    border-left: 1px solid var(--border-color);
+    padding: 2rem 1.6rem;
 }
 
-.inner-container h1{
-    margin-bottom: 30px;
-    font-size: 30px;
-    font-weight: 900;
-}
-
-.text{
-    font-size: 13px;
-    color: #545454;
-    line-height: 30px;
-    text-align: justify;
-    margin-bottom: 40px;
-}
-
-.skills{
-    display:flex;
-    justify-content: space-between;
+.inner-container h1 {
+    margin-bottom: 1.2rem;
+    font-size: clamp(1.8rem, 2.6vw, 2.3rem);
     font-weight: 700;
-    font-size: 13px;
-} 
+}
 
-@media only screen and (max-width: 786px){
-    .nav-menu.responsive{
-        top: 100px;
+.text {
+    font-size: 0.98rem;
+    color: var(--text-muted);
+    line-height: 1.8;
+    text-align: justify;
+    margin-bottom: 1rem;
+}
+
+.skills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin-top: 0.7rem;
+}
+
+.skills span {
+    background: rgba(0, 212, 255, 0.12);
+    border: 1px solid rgba(0, 212, 255, 0.35);
+    color: var(--accent-blue);
+    border-radius: 999px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+@media only screen and (max-width: 900px) {
+    .about-section {
+        background-position: center;
     }
-    .nav-menu{
+
+    .inner-container {
+        width: 100%;
+        min-height: auto;
+        border-left: 0;
+    }
+}
+
+@media only screen and (max-width: 786px) {
+    .nav-menu {
         position: absolute;
-        top: -800px;
+        top: -860px;
+        left: 1rem;
+        right: 1rem;
         display: flex;
         justify-content: center;
-        background: rgba(255, 255, 255, 0.2);
-        width: 100%;
-        height: 90vh;
+        background: rgba(17, 24, 39, 0.92);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
         backdrop-filter: blur(20px);
-        transition: .3s;
+        transition: top 0.3s ease;
     }
-    .nav-menu ul{
+
+    .nav-menu.responsive {
+        top: 90px;
+    }
+
+    .nav-menu ul {
+        width: 100%;
+        padding: 0.6rem;
         flex-direction: column;
         text-align: center;
     }
-    .nav-menu-btn{
+
+    .nav-menu-btn {
         display: block;
     }
-    .nav-menu-btn i{
-        font-size: 25px;
-        color: #fff;
-        padding: 10px;
-        background: rgba(255, 255, 255, 0.2);
-        border-radius: 50%;
+
+    .nav-menu-btn i {
+        font-size: 1.5rem;
+        color: var(--text-primary);
+        padding: 0.5rem;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
         cursor: pointer;
-        transition: .3s;
-    }
-    .nav-menu-btn i:hover{
-        background: rgba(255, 255, 255, 0.15);
     }
 }
 
-
-@media screen and (max-width:1200px){
-    .inner-container{
-        padding: 30px;
+@media only screen and (max-width: 600px) {
+    .inner-container {
+        padding: 1.3rem 1rem;
     }
 }
-
-
-@media screen and (max-width:1000px){
-    .about-selection{
-        background-size: 100%;
-        padding: 100px 40px;
-    }
-    .inner-container{
-        width: 100%;
-    }
-}
-
-
-@media screen and (max-width:600px){
-    .about-selection{
-        padding: 0;
-    }
-    .inner-container{
-        padding: 60px;
-    }
-}
-
 
 footer {
-    /* Other styles */
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    width: 50%;
-    
-    color: black;
-    padding: 5px;
+    width: min(1200px, 100% - 2rem);
+    margin: 0 auto 1rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
 }

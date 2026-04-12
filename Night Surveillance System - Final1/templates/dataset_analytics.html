@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dataset Analytics - Night Surveillance System</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Sharp:opsz,wght,FILL,GRAD@48,400,0,0" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css') }}">
     <style>
         .analytics-container {
@@ -143,106 +144,223 @@
             color: #333;
             margin: 0;
         }
+
+        .header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        .analytics-main {
+            width: 100%;
+        }
+
+        .dark-theme-variables .stat-card,
+        .dark-theme-variables .chart-section {
+            background: rgba(17, 24, 39, 0.9);
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            color: #e5e7eb;
+        }
+
+        .dark-theme-variables .page-title,
+        .dark-theme-variables .chart-title,
+        .dark-theme-variables .stat-number,
+        .dark-theme-variables .activity-desc {
+            color: #e5e7eb;
+        }
+
+        .dark-theme-variables .stat-label,
+        .dark-theme-variables .activity-time {
+            color: #9ca3af;
+        }
+
+        .dark-theme-variables .activity-item {
+            background: rgba(15, 23, 42, 0.7);
+        }
     </style>
 </head>
 <body>
-    <div class="analytics-container">
-        <div class="header-section">
-            <h1 class="page-title">📊 Dataset Analytics</h1>
-            <div>
-                <a href="{{ url_for('datasets') }}" class="btn btn-primary">← Back to Datasets</a>
-                <a href="{{ url_for('dashboard') }}" class="btn btn-primary">🏠 Dashboard</a>
-            </div>
-        </div>
-        
-        <!-- Statistics Overview -->
-        <div class="stats-grid">
-            {% for stat in dataset_stats %}
-            <div class="stat-card {{ stat.dataset_type }}">
-                <div class="stat-number">{{ stat.dataset_count }}</div>
-                <div class="stat-label">{{ stat.dataset_type|title }} Datasets</div>
-                <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
-                    {{ stat.total_samples or 0 }} total samples
+    <div class="container">
+        <aside>
+            <div class="top">
+                <div class="logo">
+                    <h2>NIGHT <span class="danger">SHIELD</span></h2>
+                </div>
+                <div class="close" id="close_btn">
+                    <span class="material-symbols-sharp">close</span>
                 </div>
             </div>
-            {% endfor %}
-            
-            <div class="stat-card">
-                <div class="stat-number">{{ detection_stats|length }}</div>
-                <div class="stat-label">Object Classes</div>
-                <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
-                    Detected so far
-                </div>
+            <div class="sidebar">
+                <a href="{{ url_for('dashboard') }}">
+                    <span class="material-symbols-sharp">grid_view</span>
+                    <h3>Dashboard</h3>
+                </a>
+                <a href="{{ url_for('addCamera') }}">
+                    <span class="material-symbols-sharp">videocam</span>
+                    <h3>Video Cam</h3>
+                </a>
+                <a href="{{ url_for('upload_video') }}">
+                    <span class="material-symbols-sharp">upload</span>
+                    <h3>Upload Video</h3>
+                </a>
+                <a href="{{ url_for('lowlight_detection') }}">
+                    <span class="material-symbols-sharp">nightlight</span>
+                    <h3>Low-Light Detection</h3>
+                </a>
+                <a href="{{ url_for('image_enhancement') }}">
+                    <span class="material-symbols-sharp">auto_fix_high</span>
+                    <h3>Image Enhancement</h3>
+                </a>
+                <a href="{{ url_for('datasets') }}">
+                    <span class="material-symbols-sharp">dataset</span>
+                    <h3>Datasets</h3>
+                </a>
+                <a href="{{ url_for('surveillance_events') }}">
+                    <span class="material-symbols-sharp">security</span>
+                    <h3>Events</h3>
+                </a>
+                <a href="{{ url_for('dataset_analytics') }}" class="active">
+                    <span class="material-symbols-sharp">analytics</span>
+                    <h3>Analytics</h3>
+                </a>
+                <a href="{{ url_for('contact') }}">
+                    <span class="material-symbols-sharp">help</span>
+                    <h3>Help</h3>
+                </a>
+                <a href="{{ url_for('logout') }}">
+                    <span class="material-symbols-sharp">logout</span>
+                    <h3>Logout</h3>
+                </a>
             </div>
-        </div>
-        
-        <!-- Detection Statistics -->
-        {% if detection_stats %}
-        <div class="chart-section">
-            <h3 class="chart-title">🎯 Detection Statistics</h3>
-            <div class="detection-list">
-                {% for detection in detection_stats %}
-                <div class="detection-item">
-                    <div>
-                        <span class="object-class">{{ detection.object_class|title }}</span>
-                        <div style="font-size: 0.9em; color: #666;">
-                            {{ detection.detection_count }} detections
-                        </div>
-                    </div>
-                    <div>
-                        <div style="text-align: right; font-size: 0.9em; margin-bottom: 5px;">
-                            Avg: {{ "%.1f"|format(detection.avg_confidence * 100) }}%
-                        </div>
-                        <div class="confidence-bar">
-                            <div class="confidence-fill" data-confidence="{{ (detection.avg_confidence * 100)|round }}" style="width:0%;"></div>
-                        </div>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-        
-        <!-- Recent Activity -->
-        <div class="chart-section">
-            <h3 class="chart-title">🕒 Recent Activity</h3>
-            {% if recent_activity %}
-            <div class="activity-feed">
-                {% for activity in recent_activity %}
-                <div class="activity-item {{ activity.type|lower }}">
-                    <div class="activity-time">{{ activity.timestamp }}</div>
-                    <div class="activity-desc">
-                        {% if activity.type == 'Detection' %}
-                            🎯 {{ activity.description|title }} detected
-                            {% if activity.value %}
-                                ({{ "%.1f"|format(activity.value * 100) }}% confidence)
-                            {% endif %}
-                        {% else %}
-                            🔔 {{ activity.description|title }} event
-                        {% endif %}
+        </aside>
+
+        <main class="analytics-main">
+            <div class="analytics-container">
+                <div class="header-section">
+                    <h1 class="page-title">📊 Dataset Analytics</h1>
+                    <div class="header-actions">
+                        <a href="{{ url_for('datasets') }}" class="btn btn-primary">← Back to Datasets</a>
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-primary">🏠 Dashboard</a>
                     </div>
                 </div>
-                {% endfor %}
+
+                <!-- Statistics Overview -->
+                <div class="stats-grid">
+                    {% for stat in dataset_stats %}
+                    <div class="stat-card {{ stat.dataset_type }}">
+                        <div class="stat-number">{{ stat.dataset_count }}</div>
+                        <div class="stat-label">{{ stat.dataset_type|title }} Datasets</div>
+                        <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                            {{ stat.total_samples or 0 }} total samples
+                        </div>
+                    </div>
+                    {% endfor %}
+
+                    <div class="stat-card">
+                        <div class="stat-number">{{ detection_stats|length }}</div>
+                        <div class="stat-label">Object Classes</div>
+                        <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                            Detected so far
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Detection Statistics -->
+                {% if detection_stats %}
+                <div class="chart-section">
+                    <h3 class="chart-title">🎯 Detection Statistics</h3>
+                    <div class="detection-list">
+                        {% for detection in detection_stats %}
+                        <div class="detection-item">
+                            <div>
+                                <span class="object-class">{{ detection.object_class|title }}</span>
+                                <div style="font-size: 0.9em; color: #666;">
+                                    {{ detection.detection_count }} detections
+                                </div>
+                            </div>
+                            <div>
+                                <div style="text-align: right; font-size: 0.9em; margin-bottom: 5px;">
+                                    Avg: {{ "%.1f"|format(detection.avg_confidence * 100) }}%
+                                </div>
+                                <div class="confidence-bar">
+                                    <div class="confidence-fill" data-confidence="{{ (detection.avg_confidence * 100)|round }}" style="width:0%;"></div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Recent Activity -->
+                <div class="chart-section">
+                    <h3 class="chart-title">🕒 Recent Activity</h3>
+                    {% if recent_activity %}
+                    <div class="activity-feed">
+                        {% for activity in recent_activity %}
+                        <div class="activity-item {{ activity.type|lower }}">
+                            <div class="activity-time">{{ activity.timestamp }}</div>
+                            <div class="activity-desc">
+                                {% if activity.type == 'Detection' %}
+                                    🎯 {{ activity.description|title }} detected
+                                    {% if activity.value %}
+                                        ({{ "%.1f"|format(activity.value * 100) }}% confidence)
+                                    {% endif %}
+                                {% else %}
+                                    🔔 {{ activity.description|title }} event
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div style="text-align: center; padding: 40px; color: #666;">
+                        <h3>No activity yet</h3>
+                        <p>Activity will appear here as your surveillance system detects objects and logs events.</p>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- Quick Actions -->
+                <div class="chart-section">
+                    <h3 class="chart-title">⚡ Quick Actions</h3>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <a href="{{ url_for('add_dataset') }}" class="btn btn-primary">+ Add New Dataset</a>
+                        <a href="{{ url_for('surveillance_events') }}" class="btn btn-primary">📋 View All Events</a>
+                        <a href="{{ url_for('video_feed') }}" class="btn btn-primary">📹 Live Feed</a>
+                        <button onclick="location.reload()" class="btn btn-primary">🔄 Refresh Data</button>
+                    </div>
+                </div>
             </div>
-            {% else %}
-            <div style="text-align: center; padding: 40px; color: #666;">
-                <h3>No activity yet</h3>
-                <p>Activity will appear here as your surveillance system detects objects and logs events.</p>
-            </div>
-            {% endif %}
-        </div>
-        
-        <!-- Quick Actions -->
-        <div class="chart-section">
-            <h3 class="chart-title">⚡ Quick Actions</h3>
-            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                <a href="{{ url_for('add_dataset') }}" class="btn btn-primary">+ Add New Dataset</a>
-                <a href="{{ url_for('surveillance_events') }}" class="btn btn-primary">📋 View All Events</a>
-                <a href="{{ url_for('video_feed') }}" class="btn btn-primary">📹 Live Feed</a>
-                <button onclick="location.reload()" class="btn btn-primary">🔄 Refresh Data</button>
+        </main>
+
+        <div class="right">
+            <div class="top">
+                <button id="menu_bar">
+                    <span class="material-symbols-sharp">menu</span>
+                </button>
+
+                <div class="theme-toggler">
+                    <span class="material-symbols-sharp active">light_mode</span>
+                    <span class="material-symbols-sharp">dark_mode</span>
+                </div>
+
+                <div class="profile">
+                    <div class="info">
+                        <p><b>Profile</b></p>
+                        <p>{{ session.get('firstname', 'Admin') }}</p>
+                        <small class="text-muted"></small>
+                    </div>
+                    <div class="profile-photo">
+                        <img src="{{ url_for('static', filename='images/Profile-pic.jpeg') }}" alt=""/>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard-script.js') }}"></script>
     <script>
     // Apply dynamic widths after DOM loads (avoids template syntax confusing CSS parser)
     document.querySelectorAll('.confidence-fill[data-confidence]').forEach(function(el){

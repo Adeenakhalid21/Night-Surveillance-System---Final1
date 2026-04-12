@@ -4,125 +4,124 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/home-style.css')}}">
-    <title>Night_Shield | Login & Registration </title>
+    <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/home-style.css') }}">
+    <title>NightWatch | Secure Access</title>
 </head>
 <body>
- <div class="wrapper">
-    <nav class="nav">
-        <div class="nav-shield">
-            <p>NIGHT SHIELD </p>
-        </div>
-        <div class="nav-menu" id="navMenu">
-            <ul>
-                <li><a href="#" class="link active">Home</a></li>
-                <li><a href="/contact" class="link">Contact</a></li>
-                <li><a href="/services" class="link">Services</a></li>
-                <li><a href="/about" class="link">About</a></li>
-            </ul>
-        </div>
-        <div class="nav-button">
-            <button class="btn white-btn" id="loginBtn" onclick="login()">Sign In</button>
-            <button class="btn" id="registerBtn" onclick="register()">Sign Up</button>
-        </div>
-        <div class="nav-menu-btn">
-            <i class="bx bx-menu" onclick="myMenuFunction()"></i>
-        </div>
-    </nav>
+<canvas id="particleCanvas" aria-hidden="true"></canvas>
+<div class="grid-overlay" aria-hidden="true"></div>
 
-<!----------------------------- Form box ----------------------------------->    
-    <div class="form-box">
-        
-        <!------------------- login form -------------------------->
-        <form action="{{ url_for('login') }}" method="post">
-        <div class="login-container" id="login">
-            <div class="top">
-                <span>Don't have an account? <a href="#" onclick="register()">Sign Up</a></span>
-                <header>Login</header>
-                {% if mesage %}
-                <div style="margin-top:10px;color:#e63946;background:#ffecec;padding:8px 12px;border-radius:6px;font-size:0.9em;">
-                    {{ mesage }}
-                </div>
-                {% endif %}
-            </div>
-            <div class="input-box">
-                <input type="text" name="email" class="input-field" id="usernameField" placeholder="Email or First name">
-                <i class="bx bx-user"></i>
-            </div>
-            <div class="input-box" style="position:relative;">
-                <input type="password" name="password" class="input-field" id="passwordField" placeholder="Password">
-                <i class="bx bx-lock-alt"></i>
-                <button type="button" id="toggleLoginPw" class="pw-toggle" aria-label="Show password" title="Show password">
-                    <i class='bx bx-show'></i>
-                </button>
-            </div>
-            <div class="input-box">
-                <input type="submit" class="submit" value="Sign In">
-            </div>
-            <div class="two-col">
-                <div class="one">
-                    <input type="checkbox" id="login-check">
-                    <label for="login-check"> Remember Me</label>
-                </div>
-                <div class="two">
-                    <label><a href="#">Forgot password?</a></label>
-                </div>
-            </div>
-        </div>
-        </form>
-
-        <!------------------- registration form -------------------------->
-        <form action="{{ url_for('signup') }}" method="post">
-        <div class="register-container" id="register">
-            <div class="top">
-                <span>Have an account? <a href="#" onclick="login()">Login</a></span>
-                <header>Sign Up</header>
-                {% if mesage %}
-                <div style="margin-top:10px;color:#1b4332;background:#e9f7ef;padding:8px 12px;border-radius:6px;font-size:0.9em;">
-                    {{ mesage }}
-                </div>
-                {% endif %}
-            </div>
-            <div class="two-forms">
-                <div class="input-box">
-                    <input type="text" name="firstname" class="input-field" placeholder="Firstname">
-                    <i class="bx bx-user"></i>
-                </div>
-                <div class="input-box">
-                    <input type="text" name="lastname" class="input-field" placeholder="Lastname">
-                    <i class="bx bx-user"></i>
-                </div>
-            </div>
-            <div class="input-box">
-                <input type="text" name="email" class="input-field" placeholder="Email">
-                <i class="bx bx-envelope"></i>
-            </div>
-            <div class="input-box" style="position:relative;">
-                <input type="password" name="password" class="input-field" id="registerPasswordField" placeholder="Password">
-                <i class="bx bx-lock-alt"></i>
-                <button type="button" id="toggleRegisterPw" class="pw-toggle" aria-label="Show password" title="Show password">
-                    <i class='bx bx-show'></i>
-                </button>
-            </div>
-            <div class="input-box">
-                <input type="submit" class="submit" value="Register">
-            </div>
-            <div class="two-col">
-                <div class="one">
-                    <input type="checkbox" id="register-check">
-                    <label for="register-check"> Remember Me</label>
-                </div>
-                <div class="two">
-                    <label><a href="/night-shield-legal">Terms & conditions</a></label>
-                </div>
-            </div>
-        </div>
-        </form>
+<header class="site-header">
+    <div class="brand">
+        <span class="brand-dot"></span>
+        NightWatch
     </div>
-</div>   
-<!-- Link your JavaScript file -->
-<script src="{{ url_for('static', filename='js/home-script.js')}}"></script>
+    <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Open menu">
+        <i class="bx bx-menu"></i>
+    </button>
+    <nav class="site-nav" id="siteNav">
+        <a href="/" class="active">Home</a>
+        <a href="/services">Services</a>
+        <a href="/contact">Contact</a>
+        <a href="/about">About</a>
+    </nav>
+</header>
 
+<main class="auth-shell">
+    <section class="auth-card">
+        <div class="auth-icon-wrap">
+            <i class="bx bx-camera-home auth-icon"></i>
+        </div>
+        <h1>NightWatch</h1>
+        <p class="subtitle">Surveillance System</p>
+
+        <div class="auth-tabs">
+            <button type="button" class="tab-btn active" id="loginTab">Sign In</button>
+            <button type="button" class="tab-btn" id="registerTab">Sign Up</button>
+        </div>
+
+        {% if mesage %}
+            {% set low = mesage|lower %}
+            {% set is_error = ('failed' in low) or ('incorrect' in low) or ('invalid' in low) or ('not found' in low) or ('already exists' in low) %}
+            <div class="auth-message {{ 'error' if is_error else 'success' }}">{{ mesage }}</div>
+        {% endif %}
+
+        <form action="{{ url_for('login') }}" method="post" class="auth-form" id="loginPanel">
+            <label class="input-wrap">
+                <i class="bx bx-user"></i>
+                <input
+                    type="text"
+                    name="email"
+                    id="usernameField"
+                    placeholder="Email or username"
+                    value="{{ remembered_username|default('', true) }}"
+                    autocomplete="username"
+                    required
+                >
+            </label>
+
+            <label class="input-wrap">
+                <i class="bx bx-lock-alt"></i>
+                <input
+                    type="password"
+                    name="password"
+                    id="passwordField"
+                    placeholder="Password"
+                    autocomplete="current-password"
+                    required
+                >
+                <button type="button" class="password-toggle" data-target="passwordField" aria-label="Show password">
+                    <i class="bx bx-show"></i>
+                </button>
+            </label>
+
+            <div class="auth-row">
+                <label class="toggle-wrap" for="rememberMeSwitch">
+                    <input type="checkbox" id="rememberMeSwitch" name="remember_me" {% if remembered_username %}checked{% endif %}>
+                    <span class="switch"></span>
+                    <span class="switch-label">Remember Me</span>
+                </label>
+                <a href="#" class="muted-link">Forgot password?</a>
+            </div>
+
+            <button type="submit" class="submit-btn">Sign In</button>
+        </form>
+
+        <form action="{{ url_for('signup') }}" method="post" class="auth-form hidden" id="registerPanel">
+            <div class="input-grid">
+                <label class="input-wrap">
+                    <i class="bx bx-user"></i>
+                    <input type="text" name="firstname" placeholder="First name" autocomplete="given-name" required>
+                </label>
+                <label class="input-wrap">
+                    <i class="bx bx-user"></i>
+                    <input type="text" name="lastname" placeholder="Last name" autocomplete="family-name" required>
+                </label>
+            </div>
+
+            <label class="input-wrap">
+                <i class="bx bx-envelope"></i>
+                <input type="email" name="email" placeholder="Email" autocomplete="email" required>
+            </label>
+
+            <label class="input-wrap">
+                <i class="bx bx-lock-alt"></i>
+                <input type="password" name="password" id="registerPasswordField" placeholder="Password" autocomplete="new-password" required>
+                <button type="button" class="password-toggle" data-target="registerPasswordField" aria-label="Show password">
+                    <i class="bx bx-show"></i>
+                </button>
+            </label>
+
+            <div class="auth-row compact">
+                <a href="/night-shield-legal" class="muted-link">Terms and conditions</a>
+            </div>
+
+            <button type="submit" class="submit-btn">Create Account</button>
+        </form>
+    </section>
+</main>
+
+<script src="{{ url_for('static', filename='js/home-script.js') }}"></script>
 </body>
 </html>

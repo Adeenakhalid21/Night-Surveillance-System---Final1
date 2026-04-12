@@ -5,12 +5,16 @@ import re, os
 from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
-from enhancement import enhance_image
+from enhancement import enhance_image, enhance_night_image, enhancement_stage_keys
 import random
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import threading
 import time
+from datetime import timedelta
+import uuid
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from werkzeug.utils import secure_filename
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -64,8 +68,42 @@ motion_detected = False
 recent_anomalies = []
 anomalies_lock = threading.Lock()
 
+# Async image enhancement jobs
+enhancement_jobs = {}
+enhancement_jobs_lock = threading.Lock()
+
 # Initialize Flask application
 app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'mysecretkey')
+app.permanent_session_lifetime = timedelta(days=30)
+
+REMEMBER_COOKIE_NAME = 'remember_token'
+REMEMBER_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
+REMEMBER_COOKIE_SALT = 'nightwatch-remember'
+
+
+def _remember_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(app.secret_key, salt=REMEMBER_COOKIE_SALT)
+
+
+def create_remember_token(username: str) -> str:
+    return _remember_serializer().dumps({'username': username})
+
+
+def parse_remember_token(token: str) -> str:
+    try:
+        payload = _remember_serializer().loads(token, max_age=REMEMBER_COOKIE_MAX_AGE)
+        username = (payload or {}).get('username', '')
+        return username if isinstance(username, str) else ''
+    except (BadSignature, SignatureExpired):
+        return ''
+    except Exception:
+        return ''
+
+
+def get_remembered_username_from_request() -> str:
+    token = request.cookies.get(REMEMBER_COOKIE_NAME, '')
+    return parse_remember_token(token) if token else ''
 
 # Get the directory where main.py is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -90,6 +128,109 @@ def allowed_file(filename):
 
 def allowed_image(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_IMAGES']
+
+
+def _new_enhancement_job(job_id: str) -> dict:
+    stages = [
+        {'key': item['key'], 'label': item['label'], 'status': 'pending'}
+        for item in enhancement_stage_keys()
+    ]
+    return {
+        'job_id': job_id,
+        'status': 'queued',
+        'progress': 0,
+        'stages': stages,
+        'result': None,
+        'error': None,
+    }
+
+
+def _compute_job_progress(stages: list[dict]) -> int:
+    if not stages:
+        return 0
+    completed = sum(1 for stage in stages if stage.get('status') == 'done')
+    return int((completed / len(stages)) * 100)
+
+
+def _update_enhancement_stage(job_id: str, stage_key: str, stage_status: str) -> None:
+    with enhancement_jobs_lock:
+        job = enhancement_jobs.get(job_id)
+        if not job:
+            return
+        for stage in job['stages']:
+            if stage.get('key') == stage_key:
+                stage['status'] = stage_status
+                break
+        if stage_status == 'running':
+            job['status'] = 'processing'
+        job['progress'] = _compute_job_progress(job['stages'])
+
+
+def _mark_enhancement_failed(job_id: str, error_message: str) -> None:
+    with enhancement_jobs_lock:
+        job = enhancement_jobs.get(job_id)
+        if not job:
+            return
+        for stage in job['stages']:
+            if stage.get('status') == 'running':
+                stage['status'] = 'failed'
+        job['status'] = 'failed'
+        job['error'] = error_message
+
+
+def _mark_enhancement_done(job_id: str, result_payload: dict) -> None:
+    with enhancement_jobs_lock:
+        job = enhancement_jobs.get(job_id)
+        if not job:
+            return
+        for stage in job['stages']:
+            if stage.get('status') != 'done':
+                stage['status'] = 'done'
+        job['status'] = 'completed'
+        job['progress'] = 100
+        job['result'] = result_payload
+
+
+def _process_enhancement_job(job_id: str, original_path: str, original_filename: str, settings: dict) -> None:
+    try:
+        def progress_callback(stage_key: str, stage_status: str) -> None:
+            _update_enhancement_stage(job_id, stage_key, stage_status)
+
+        outcome = enhance_night_image(original_path, settings=settings, progress_callback=progress_callback)
+
+        enhanced_img = outcome['enhanced_image']
+        comparison_img = outcome['comparison_image']
+        stats = outcome['stats']
+
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        safe_name = secure_filename(original_filename) or f'image_{timestamp}.jpg'
+        stem = os.path.splitext(safe_name)[0]
+
+        enhanced_name = f'enhanced_{timestamp}_{stem}.jpg'
+        comparison_name = f'comparison_{timestamp}_{stem}.jpg'
+
+        enhanced_path = os.path.join(app.config['LOWLIGHT_FOLDER'], enhanced_name)
+        comparison_path = os.path.join(app.config['LOWLIGHT_FOLDER'], comparison_name)
+
+        enhanced_img.save(enhanced_path, format='JPEG', quality=95)
+        comparison_img.save(comparison_path, format='JPEG', quality=95)
+
+        size_bytes = os.path.getsize(enhanced_path)
+        size_kb = round(size_bytes / 1024, 1)
+
+        _mark_enhancement_done(
+            job_id,
+            {
+                'original_url': f"/static/lowlight_uploads/{os.path.basename(original_path)}",
+                'enhanced_url': f"/static/lowlight_uploads/{enhanced_name}",
+                'comparison_url': f"/static/lowlight_uploads/{comparison_name}",
+                'enhanced_size_kb': size_kb,
+                'download_name': f'enhanced_{stem}.jpg',
+                'stats': stats,
+            },
+        )
+    except Exception as exc:
+        _mark_enhancement_failed(job_id, f'Enhancement failed: {exc}')
 
 def detect_anomalies(frame, camera_id=1):
     """Detect anomalies in frame using YOLO and send alerts"""
@@ -396,7 +537,11 @@ def video_stream(source, stop_event):
 # Route for home page
 @app.route('/')
 def index():
-    return render_template('home.html')
+    remembered_username = ''
+    token = request.cookies.get(REMEMBER_COOKIE_NAME, '')
+    if token:
+        remembered_username = parse_remember_token(token)
+    return render_template('home.html', remembered_username=remembered_username)
 
 @app.route('/upload')
 def upload():
@@ -427,8 +572,6 @@ def upload_video_feed():
         stop_event = threading.Event()
         return Response(video_stream(video_path, stop_event), mimetype='multipart/x-mixed-replace; boundary=frame')
     return 'No video path provided'
-
-app.secret_key = 'mysecretkey'
 
 # SQLite database configuration
 DATABASE = 'night_surveillance.db'
@@ -467,6 +610,8 @@ class PGConn:
         return PGCursor(cur)
     def commit(self):
         self._conn.commit()
+    def rollback(self):
+        self._conn.rollback()
     def close(self):
         self._conn.close()
 
@@ -598,6 +743,7 @@ else:
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     mesage=''
+    remembered_username = get_remembered_username_from_request()
     if request.method == 'POST':
         lastname = (request.form.get('lastname') or '').strip()
         firstName = (request.form.get('firstname') or '').strip()
@@ -608,10 +754,10 @@ def signup():
 
         if not firstName or not password or not email:
             mesage = 'Please fill out the form!'
-            return render_template('home.html', mesage=mesage)
+            return render_template('home.html', mesage=mesage, remembered_username=remembered_username)
         if not re.match(r'[^@]+@[^@]+\.[^@]+', email):
             mesage = 'Invalid email address!'
-            return render_template('home.html', mesage=mesage)
+            return render_template('home.html', mesage=mesage, remembered_username=remembered_username)
 
         conn = get_db_connection()
         try:
@@ -629,20 +775,22 @@ def signup():
             mesage = 'Registration failed. Please try again.'
         finally:
             conn.close()
-    return render_template('home.html', mesage = mesage)
+    return render_template('home.html', mesage=mesage, remembered_username=remembered_username)
 
 
 # Login API
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     mesage = ''
+    remembered_username = get_remembered_username_from_request()
     if request.method == 'POST':
         raw_identifier = (request.form.get('email') or request.form.get('username') or '').strip()
         password = request.form.get('password') or ''
+        remember_me = (request.form.get('remember_me') or '').strip().lower() in ('on', '1', 'true', 'yes')
 
         if not raw_identifier or not password.strip():
             mesage = 'Please provide both email/username and password.'
-            return render_template('home.html', mesage=mesage)
+            return render_template('home.html', mesage=mesage, remembered_username=raw_identifier or remembered_username)
 
         conn = get_db_connection()
         try:
@@ -676,6 +824,7 @@ def login():
                     session['sno'] = user['sno']
                     session['firstname'] = user['firstname']
                     session['email'] = user['email']
+                    session.permanent = remember_me
                     mesage = 'Logged in successfully!'
                     try:
                         log_surveillance_event_db({
@@ -688,13 +837,36 @@ def login():
                         })
                     except Exception:
                         pass
-                    return redirect(url_for('dashboard'))
+                    response = redirect(url_for('dashboard'))
+                    if remember_me:
+                        remember_token = create_remember_token(user['email'])
+                        response.set_cookie(
+                            REMEMBER_COOKIE_NAME,
+                            remember_token,
+                            max_age=REMEMBER_COOKIE_MAX_AGE,
+                            httponly=True,
+                            secure=bool(request.is_secure),
+                            samesite='Lax',
+                        )
+                    else:
+                        response.delete_cookie(REMEMBER_COOKIE_NAME)
+                    return response
         except Exception as e:
             print(f"[AUTH] Login failed: {e}")
             mesage = 'Login failed due to a server error. Please try again.'
         finally:
             conn.close()
-    return render_template('home.html', mesage=mesage)
+    if request.method == 'POST' and raw_identifier:
+        remembered_username = raw_identifier
+    return render_template('home.html', mesage=mesage, remembered_username=remembered_username)
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    response = redirect(url_for('index'))
+    response.delete_cookie(REMEMBER_COOKIE_NAME)
+    return response
 
 
 @app.route('/lowlight_detection', methods=['GET', 'POST'])
@@ -772,72 +944,61 @@ def lowlight_detection():
 
 @app.route('/image_enhancement', methods=['GET', 'POST'])
 def image_enhancement():
-    """
-    Image Enhancement for Low-Light Photos
-    Enhances images without YOLO detection - only applies enhancement algorithms
-    """
     if request.method == 'POST':
-        print("[IMAGE_ENHANCEMENT] POST request received", flush=True)
-        
         if 'image' not in request.files:
-            print("[IMAGE_ENHANCEMENT] No image in request", flush=True)
             return jsonify({'error': 'No image file provided'}), 400
-        
-        file = request.files['image']
-        if file.filename == '':
-            print("[IMAGE_ENHANCEMENT] Empty filename", flush=True)
+
+        image_file = request.files['image']
+        if image_file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
-        
-        print(f"[IMAGE_ENHANCEMENT] File received: {file.filename}", flush=True)
-        
-        if file and allowed_image(file.filename):
-            # Create upload directory
-            os.makedirs(app.config['LOWLIGHT_FOLDER'], exist_ok=True)
-            
-            # Save uploaded file with timestamp
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"original_{timestamp}_{file.filename}"
-            filepath = os.path.join(app.config['LOWLIGHT_FOLDER'], filename)
-            file.save(filepath)
-            print(f"[IMAGE_ENHANCEMENT] Original saved: {filepath}", flush=True)
-            
-            # Read the image
-            img = cv2.imread(filepath)
-            if img is None:
-                print("[IMAGE_ENHANCEMENT] Failed to read image with cv2", flush=True)
-                return jsonify({'error': 'Failed to read image'}), 500
-            
-            print(f"[IMAGE_ENHANCEMENT] Image read: shape={img.shape}", flush=True)
-            
-            # Enhance the image using enhancement module
-            try:
-                enhanced_img = enhance_image(img)
-                print("[IMAGE_ENHANCEMENT] Enhancement successful", flush=True)
-            except Exception as e:
-                print(f"[IMAGE_ENHANCEMENT] Enhancement failed: {e}", flush=True)
-                return jsonify({'error': f'Enhancement failed: {str(e)}'}), 500
-            
-            # Save enhanced image
-            enhanced_filename = f"enhanced_{timestamp}_{file.filename}"
-            enhanced_path = os.path.join(app.config['LOWLIGHT_FOLDER'], enhanced_filename)
-            success = cv2.imwrite(enhanced_path, enhanced_img)
-            print(f"[IMAGE_ENHANCEMENT] Enhanced saved: {enhanced_path}, success={success}", flush=True)
-            
-            # Return paths to both images - use url_for for proper URL generation
-            # or construct URLs with forward slashes
-            response_data = {
-                'success': True,
-                'original': f"/static/lowlight_uploads/{filename}".replace('\\', '/'),
-                'enhanced': f"/static/lowlight_uploads/{enhanced_filename}".replace('\\', '/')
-            }
-            print(f"[IMAGE_ENHANCEMENT] Returning: {response_data}", flush=True)
-            return jsonify(response_data)
-        else:
-            print(f"[IMAGE_ENHANCEMENT] Invalid file type: {file.filename}", flush=True)
+
+        if not allowed_image(image_file.filename):
             return jsonify({'error': 'Invalid file type. Please upload JPG, PNG, or BMP'}), 400
-    
-    # GET request - render the enhancement page
+
+        os.makedirs(app.config['LOWLIGHT_FOLDER'], exist_ok=True)
+
+        safe_name = secure_filename(image_file.filename) or 'uploaded_image.jpg'
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        original_name = f'original_{timestamp}_{safe_name}'
+        original_path = os.path.join(app.config['LOWLIGHT_FOLDER'], original_name)
+        image_file.save(original_path)
+
+        def _safe_float(name: str, default: float) -> float:
+            try:
+                return float(request.form.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        settings = {
+            'brightness': _safe_float('brightness', 55),
+            'contrast': _safe_float('contrast', 65),
+            'sharpness': _safe_float('sharpness', 60),
+            'denoise': _safe_float('denoise', 55),
+        }
+
+        job_id = uuid.uuid4().hex
+        with enhancement_jobs_lock:
+            enhancement_jobs[job_id] = _new_enhancement_job(job_id)
+
+        worker = threading.Thread(
+            target=_process_enhancement_job,
+            args=(job_id, original_path, image_file.filename, settings),
+            daemon=True,
+        )
+        worker.start()
+
+        return jsonify({'success': True, 'job_id': job_id}), 202
+
     return render_template('image_enhancement.html')
+
+
+@app.route('/image_enhancement/progress/<job_id>')
+def image_enhancement_progress(job_id):
+    with enhancement_jobs_lock:
+        job = enhancement_jobs.get(job_id)
+        if not job:
+            return jsonify({'error': 'Enhancement job not found'}), 404
+        return jsonify(job)
 
 @app.route('/dashboard')
 def dashboard():
@@ -996,30 +1157,54 @@ def dataset_details(dataset_id):
         conn.close()
         return "Dataset not found", 404
     
-    # Get training data samples
-    samples = conn.execute('''
-        SELECT * FROM training_data 
-        WHERE dataset_id = ? 
-        ORDER BY added_date DESC 
-        LIMIT 100
-    ''', (dataset_id,)).fetchall()
+    # Get training data samples (optional table in some deployments)
+    try:
+        samples = conn.execute('''
+            SELECT * FROM training_data 
+            WHERE dataset_id = ? 
+            ORDER BY added_date DESC 
+            LIMIT 100
+        ''', (dataset_id,)).fetchall()
+    except Exception as exc:
+        print(f"[DATASET] Could not load training_data samples: {exc}")
+        samples = []
+
+    category_values = set()
+    for sample in samples:
+        value = None
+        if isinstance(sample, dict):
+            value = sample.get('category')
+        else:
+            try:
+                value = sample['category']
+            except Exception:
+                value = getattr(sample, 'category', None)
+
+        if value is not None and str(value).strip():
+            category_values.add(str(value).strip())
+    category_count = len(category_values)
     
-    # Get detection results if it's a detection dataset
-    detections = conn.execute('''
-        SELECT dr.*, c.camname 
-        FROM detection_results dr
-        LEFT JOIN cam c ON dr.camera_id = c.id
-        WHERE dr.dataset_id = ? 
-        ORDER BY dr.timestamp DESC 
-        LIMIT 50
-    ''', (dataset_id,)).fetchall()
+    # Get detection results (optional table in some deployments)
+    try:
+        detections = conn.execute('''
+            SELECT dr.*, c.camname 
+            FROM detection_results dr
+            LEFT JOIN cam c ON dr.camera_id = c.id
+            WHERE dr.dataset_id = ? 
+            ORDER BY dr.timestamp DESC 
+            LIMIT 50
+        ''', (dataset_id,)).fetchall()
+    except Exception as exc:
+        print(f"[DATASET] Could not load detection_results: {exc}")
+        detections = []
     
     conn.close()
     
     return render_template('dataset_details.html', 
                          dataset=dataset, 
                          samples=samples, 
-                         detections=detections)
+                         detections=detections,
+                         category_count=category_count)
 
 @app.route('/save_detection_to_dataset', methods=['POST'])
 def save_detection_to_dataset():
@@ -1129,35 +1314,64 @@ def dataset_analytics():
         GROUP BY dataset_type
     ''').fetchall()
     
-    # Get detection statistics
-    detection_stats = conn.execute('''
-        SELECT 
-            object_class,
-            COUNT(*) as detection_count,
-            AVG(confidence) as avg_confidence
-        FROM detection_results 
-        GROUP BY object_class
-        ORDER BY detection_count DESC
-    ''').fetchall()
+    # Get detection statistics (optional table in some deployments)
+    try:
+        detection_stats = conn.execute('''
+            SELECT 
+                object_class,
+                COUNT(*) as detection_count,
+                AVG(confidence) as avg_confidence
+            FROM detection_results 
+            GROUP BY object_class
+            ORDER BY detection_count DESC
+        ''').fetchall()
+    except Exception as exc:
+        print(f"[DATASET] Could not load detection stats: {exc}")
+        detection_stats = []
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     
-    # Get recent activity
-    recent_activity = conn.execute('''
-        SELECT 
-            'Detection' as type, 
-            object_class as description, 
-            timestamp,
-            confidence as value
-        FROM detection_results 
-        UNION ALL
-        SELECT 
-            'Event' as type, 
-            event_type as description, 
-            timestamp,
-            NULL as value
-        FROM surveillance_events
-        ORDER BY timestamp DESC
-        LIMIT 20
-    ''').fetchall()
+    # Get recent activity with a graceful fallback when detection_results is unavailable
+    try:
+        recent_activity = conn.execute('''
+            SELECT 
+                'Detection' as type, 
+                object_class as description, 
+                timestamp,
+                confidence as value
+            FROM detection_results 
+            UNION ALL
+            SELECT 
+                'Event' as type, 
+                event_type as description, 
+                timestamp,
+                NULL as value
+            FROM surveillance_events
+            ORDER BY timestamp DESC
+            LIMIT 20
+        ''').fetchall()
+    except Exception as exc:
+        print(f"[DATASET] Could not load combined activity feed: {exc}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            recent_activity = conn.execute('''
+                SELECT 
+                    'Event' as type,
+                    event_type as description,
+                    timestamp,
+                    NULL as value
+                FROM surveillance_events
+                ORDER BY timestamp DESC
+                LIMIT 20
+            ''').fetchall()
+        except Exception as fallback_exc:
+            print(f"[DATASET] Could not load event-only activity feed: {fallback_exc}")
+            recent_activity = []
     
     conn.close()
     

@@ -1,44 +1,39 @@
-@import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,500;0,600;0,700;0,800;1,600&display=swap');
-
-
-/* variables */
-
+@import url('design-tokens.css');
 
 :root {
-  --clr-primary: #7380ec;
-  --clr-danger: #4156ce;
-  --clr-success: #41f1b6;
-  --clr-white: #fff;
-  --clr-info-dark: #7d8da1;
-  --clr-info-light: #dce1eb;
-  --clr-dark: #363949;
-  --clr-warnig: #ff4edc;
-  --clr-light: rgba(132, 139, 200, 0.18);
-  --clr-primary-variant: #111e88;
-  --clr-dark-variant: #677483;
-  --clr-color-background: #f6f6f9;
+  --clr-primary: var(--accent-blue);
+  --clr-danger: var(--danger);
+  --clr-success: var(--success);
+  --clr-white: var(--bg-card);
+  --clr-info-dark: var(--text-muted);
+  --clr-info-light: rgba(255, 255, 255, 0.18);
+  --clr-dark: var(--text-primary);
+  --clr-warnig: #ffd166;
+  --clr-warning: #ffd166;
+  --clr-light: rgba(255, 255, 255, 0.1);
+  --clr-primary-variant: #0066FF;
+  --clr-dark-variant: #93a0b4;
+  --clr-color-background: var(--bg-primary);
 
-  --card-border-radius: 2rem;
-  --border-radius-1: 0.4rem;
-  --border-radius-2: 0.8rem;
-  --border-radius-3: 1.2rem;
+  --card-border-radius: var(--radius);
+  --border-radius-1: 8px;
+  --border-radius-2: 12px;
+  --border-radius-3: 16px;
 
-  --card-padding: 1.8rem;
-  --padding-1: 1.2rem;
-  --box-shadow: 0 2rem 3rem var(--clr-light);
-
+  --card-padding: 1.2rem;
+  --padding-1: 1rem;
+  --box-shadow: var(--shadow);
 }
 
 /* dark theme */
 .dark-theme-variables {
-  /* Modern, higher-contrast dark palette */
-  --clr-color-background: #0f172a;   /* slate-900 */
-  --clr-white: #111827;              /* slate-800 surface */
-  --clr-light: rgba(148, 163, 184, 0.10); /* subtle overlay */
-  --clr-dark: #e5e7eb;               /* light text */
-  --clr-info-dark: #94a3b8;          /* secondary text */
+  --clr-color-background: #070b15;
+  --clr-white: rgba(17, 24, 39, 0.78);
+  --clr-light: rgba(148, 163, 184, 0.12);
+  --clr-dark: #e5e7eb;
+  --clr-info-dark: #94a3b8;
   --clr-dark-variant: #94a3b8;
-  --clr-primary: #7380ec;            /* keep brand */
+  --clr-primary: var(--accent-green);
   --box-shadow: 0 8px 24px rgba(0,0,0,0.45);
 }
 
@@ -70,7 +65,7 @@ body{
    user-select: none;
    overflow-x: hidden;
    background: var(--clr-color-background);
-   font-family: 'Poppins', sans-serif;
+  font-family: var(--font);
 }
 
 .container  {
@@ -502,7 +497,7 @@ footer {
   bottom: 0;
   left: 40%;
   width: 50%;
-  color: #000000;
+  color: var(--text-muted);
   padding: 8px;
 }
 
