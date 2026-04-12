@@ -16,9 +16,27 @@ import time
 load_dotenv()
 
 # Lazy-load YOLO to avoid import issues blocking app startup
-weights_path = os.getenv("YOLO_WEIGHTS", "runs/detect/coco_sample_pseudo/weights/best.pt")
-if not os.path.exists(weights_path):
-    weights_path = "yolov8n.pt"
+def resolve_default_weights() -> str:
+    env_weights = (os.getenv("YOLO_WEIGHTS") or "").strip()
+    if env_weights:
+        if os.path.exists(env_weights) or env_weights.lower().startswith("yolov8"):
+            return env_weights
+        print(f"[YOLO] configured weights not found: {env_weights}, using best available local checkpoint")
+
+    candidates = [
+        "runs/detect/gun_knife_hand_ft/weights/best.pt",
+        "runs/detect/dataset2_weapon_detection_best.pt",
+        "runs/detect/gun_knife_binary/weights/best.pt",
+        "runs/detect/coco_sample_pseudo/weights/best.pt",
+        "yolov8n.pt",
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return "yolov8n.pt"
+
+
+weights_path = resolve_default_weights()
 model = None
 
 def get_model():
@@ -59,7 +77,7 @@ app.config['ALLOWED_IMAGES'] = {'jpg', 'jpeg', 'png', 'bmp'}
 
 
 DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
-IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife') or 'person,backpack,knife').split(',') if s.strip()}
+IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife,gun') or 'person,backpack,knife,gun').split(',') if s.strip()}
 ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
 
 # Anomaly detection classes (abnormal behaviors/objects)
@@ -152,7 +170,7 @@ def detect_objects_and_classify(frame, camera_id=1):
     results = m(frame)
 
     # Define the classes you want to detect
-    desired_classes = ["person", "car", "motorcycle", "bicycle", "bus", "truck"]
+    desired_classes = ["person", "car", "motorcycle", "bicycle", "bus", "truck", "knife", "gun"]
 
     # Iterate through detected objects
     for detection in results[0].boxes:
@@ -580,32 +598,37 @@ else:
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     mesage=''
-    if request.method == 'POST' and 'firstname' in request.form and 'password' in request.form:
-        lastname = request.form['lastname']
-        firstName = request.form['firstname']
-        password = request.form['password']
-        email = request.form['email']
+    if request.method == 'POST':
+        lastname = (request.form.get('lastname') or '').strip()
+        firstName = (request.form.get('firstname') or '').strip()
+        password = request.form.get('password') or ''
+        email = (request.form.get('email') or '').strip().lower()
 
         print("Get data successfully")
 
-        conn = get_db_connection()
-        account = conn.execute('SELECT * FROM user WHERE email = ?', (email,)).fetchone()
-
-        if account:
-            mesage = 'Account already exists!'
-        elif not re.match(r'[^@]+@[^@]+\.[^@]+', email):
-            mesage = 'Invalid email address!'
-        elif not firstName or not password or not email:
+        if not firstName or not password or not email:
             mesage = 'Please fill out the form!'
-        else:
-            conn.execute('INSERT INTO user (firstname, lastname, email, password) VALUES (?, ?, ?, ?)', 
-                        (firstName, lastname, email, password))
-            conn.commit()
-            mesage = 'You have successfully registered!'
-        
-        conn.close()
-    elif request.method == 'POST':
-        mesage = 'Please fill out the form!'
+            return render_template('home.html', mesage=mesage)
+        if not re.match(r'[^@]+@[^@]+\.[^@]+', email):
+            mesage = 'Invalid email address!'
+            return render_template('home.html', mesage=mesage)
+
+        conn = get_db_connection()
+        try:
+            account = conn.execute('SELECT * FROM user WHERE LOWER(email) = ?', (email,)).fetchone()
+
+            if account:
+                mesage = 'Account already exists!'
+            else:
+                conn.execute('INSERT INTO user (firstname, lastname, email, password) VALUES (?, ?, ?, ?)', 
+                            (firstName, lastname, email, password))
+                conn.commit()
+                mesage = 'You have successfully registered!'
+        except Exception as e:
+            print(f"[AUTH] Signup failed: {e}")
+            mesage = 'Registration failed. Please try again.'
+        finally:
+            conn.close()
     return render_template('home.html', mesage = mesage)
 
 
@@ -613,11 +636,11 @@ def signup():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     mesage = ''
-    if request.method == 'POST' and 'email' in request.form and 'password' in request.form:
-        raw_identifier = (request.form.get('email') or '').strip()
-        password = (request.form.get('password') or '').strip()
+    if request.method == 'POST':
+        raw_identifier = (request.form.get('email') or request.form.get('username') or '').strip()
+        password = request.form.get('password') or ''
 
-        if not raw_identifier or not password:
+        if not raw_identifier or not password.strip():
             mesage = 'Please provide both email/username and password.'
             return render_template('home.html', mesage=mesage)
 
@@ -665,7 +688,10 @@ def login():
                         })
                     except Exception:
                         pass
-                    return render_template('dashboard.html', mesage=mesage)
+                    return redirect(url_for('dashboard'))
+        except Exception as e:
+            print(f"[AUTH] Login failed: {e}")
+            mesage = 'Login failed due to a server error. Please try again.'
         finally:
             conn.close()
     return render_template('home.html', mesage=mesage)

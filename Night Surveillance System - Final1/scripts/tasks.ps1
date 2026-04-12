@@ -127,6 +127,45 @@ function Start-COCOTraining5K {
     --seed 42
 }
 
+function Start-HandWeaponTraining {
+  param(
+    [string]$WeightsRel = "runs\detect\dataset2_weapon_detection_best.pt",
+    [string]$RunName = "gun_knife_hand_ft",
+    [string]$OutRel = "datasets\prepared\gun_knife_binary"
+  )
+  $root = Get-RepoRoot
+  $inner = Get-InnerPath
+  $py = Get-VenvPython -RepoRoot $root
+  $script = Join-Path $inner "scripts\train_gun_knife_yolo.py"
+  $gunSource = Join-Path $inner "datasets\gun_dataser"
+  $knifeSource = Join-Path $inner "datasets\prepared\coco_full5k_pseudo"
+  $outPath = Join-Path $inner $OutRel
+
+  $weightsPath = Join-Path $inner $WeightsRel
+  if (-not (Test-Path $weightsPath)) {
+    $weightsPath = "auto"
+    Write-Host "[INFO] Base checkpoint not found at requested path. Using --weights auto fallback."
+  }
+
+  & $py $script `
+    --gun-source $gunSource `
+    --knife-source $knifeSource `
+    --out $outPath `
+    --weights $weightsPath `
+    --epochs 20 --batch 12 --imgsz 512 `
+    --device cpu --workers 0 --patience 6 --freeze 6 `
+    --name $RunName
+}
+
+function Use-HandWeaponWeights {
+  param([string]$RunName = "gun_knife_hand_ft")
+  $env:YOLO_WEIGHTS = "runs\detect\$RunName\weights\best.pt"
+  $env:IMPORTANT_CLASSES = "person,knife,gun,backpack"
+  $env:ANOMALY_CLASSES = "person,car,motorcycle,truck,backpack,knife,gun"
+  Write-Host "Set YOLO_WEIGHTS to $env:YOLO_WEIGHTS"
+  Write-Host "Set IMPORTANT_CLASSES to $env:IMPORTANT_CLASSES"
+}
+
 function Use-App-Weights {
   param([string]$RunName)
   $env:YOLO_WEIGHTS = "runs\detect\$RunName\weights\best.pt"
@@ -134,4 +173,4 @@ function Use-App-Weights {
   Write-Host "Set YOLO_WEIGHTS to $env:YOLO_WEIGHTS"
 }
 
-Write-Host "Loaded tasks.ps1. Available commands: Register-LOL, Start-LOLTrainingFast, Start-LOLTrainingFull, Register-COCO-Full, Start-COCOTraining5K, Use-App-Weights"
+Write-Host "Loaded tasks.ps1. Available commands: Register-LOL, Start-LOLTrainingFast, Start-LOLTrainingFull, Register-COCO-Full, Start-COCOTraining5K, Start-HandWeaponTraining, Use-HandWeaponWeights, Use-App-Weights"
