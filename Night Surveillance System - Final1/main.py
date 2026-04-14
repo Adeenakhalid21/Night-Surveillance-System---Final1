@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from PIL import Image
 from flask import Flask, render_template, Response, request, jsonify, redirect, url_for, session
 import sqlite3
 import re, os
@@ -21,34 +22,89 @@ import uuid
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.utils import secure_filename
 
+# Base directory for stable relative path resolution.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Load environment variables from .env if present
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(BASE_DIR, '.env'))
+
+
+def _resolve_local_path(path_value: str) -> str:
+    if not path_value:
+        return path_value
+    if os.path.isabs(path_value):
+        return path_value
+    return os.path.join(BASE_DIR, path_value)
 
 # Lazy-load YOLO to avoid import issues blocking app startup
-def resolve_default_weights() -> str:
-    env_weights = (os.getenv("YOLO_WEIGHTS") or "").strip()
-    if env_weights:
-        if os.path.exists(env_weights) or env_weights.lower().startswith("yolov8"):
-            return env_weights
-        print(f"[YOLO] configured weights not found: {env_weights}, using best available local checkpoint")
+def _resolve_weights_from_env_or_candidates(env_name: str, fallback_candidates: list[str]) -> str:
+    env_value = (os.getenv(env_name) or "").strip()
+    if env_value:
+        if env_value.lower().startswith("yolov8"):
+            return env_value
+        resolved_env_value = _resolve_local_path(env_value)
+        if os.path.exists(resolved_env_value):
+            return resolved_env_value
+        print(f"[YOLO] configured {env_name} not found: {env_value}")
 
-    candidates = [
-        "runs/detect/object_person_weapon_ft/weights/best.pt",
-        "runs/detect/gun_knife_finetune_v4/weights/best.pt",
-        "runs/detect/gun_knife_hand_ft/weights/best.pt",
-        "runs/detect/dataset2_weapon_detection_best.pt",
-        "runs/detect/gun_knife_binary/weights/best.pt",
+    for candidate in fallback_candidates:
+        if candidate.lower().startswith("yolov8"):
+            return candidate
+        resolved_candidate = _resolve_local_path(candidate)
+        if os.path.exists(resolved_candidate):
+            return resolved_candidate
+    return ""
+
+
+general_weights_path = _resolve_weights_from_env_or_candidates(
+    "GENERAL_WEIGHTS",
+    [
+        "runs/detect/anomaly_eval15/weights/best.pt",
+        "runs/detect/anomaly_lowlight3/weights/best.pt",
         "runs/detect/coco_sample_pseudo/weights/best.pt",
         "yolov8n.pt",
-    ]
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate
-    return "yolov8n.pt"
+    ],
+)
 
+weapon_weights_path = _resolve_weights_from_env_or_candidates(
+    "WEAPON_WEIGHTS",
+    [
+        (os.getenv("YOLO_WEIGHTS") or "").strip(),
+        "runs/detect/gun_knife_finetune_v4/weights/best.pt",
+        "runs/detect/gun_knife_binary/weights/best.pt",
+        "runs/detect/dataset2_weapon_detection_best.pt",
+    ],
+)
 
-weights_path = resolve_default_weights()
+if not general_weights_path:
+    general_weights_path = "yolov8n.pt"
+
+# Keep this legacy variable name for compatibility with existing scripts and diagnostics.
+weights_path = general_weights_path
+
+phone_weights_path = (os.getenv("PHONE_WEIGHTS") or "").strip()
+if phone_weights_path and not phone_weights_path.lower().startswith("yolov8"):
+    resolved_phone_weights = _resolve_local_path(phone_weights_path)
+    if os.path.exists(resolved_phone_weights):
+        phone_weights_path = resolved_phone_weights
+    else:
+        print(f"[YOLO] configured PHONE_WEIGHTS not found: {phone_weights_path}, phone-only detections disabled")
+        phone_weights_path = ""
+if not phone_weights_path:
+    default_phone_weights = _resolve_local_path("runs/detect/phones.pt")
+    if os.path.exists(default_phone_weights):
+        phone_weights_path = default_phone_weights
+
 model = None
+weapon_model = None
+phone_model = None
+HF_BACKEND_ALIASES = {'hf', 'transformers', 'huggingface'}
+DETECTION_BACKEND = (os.getenv('DETECTION_BACKEND', 'ultralytics') or 'ultralytics').strip().lower()
+HF_OBJECT_DETECTION_MODEL_ID = (os.getenv('HF_OBJECT_DETECTION_MODEL', 'ciasimbaya/ObjectDetection') or 'ciasimbaya/ObjectDetection').strip()
+hf_detector_pipe = None
+hf_image_processor = None
+hf_object_model = None
+hf_backend_failed = False
 
 def get_model():
     global model
@@ -56,9 +112,9 @@ def get_model():
         return model
     try:
         from ultralytics import YOLO
-        print("[YOLO] Loading model...", flush=True)
+        print(f"[YOLO] Loading general model from {weights_path}...", flush=True)
         model = YOLO(weights_path)
-        print("[YOLO] Model ready", flush=True)
+        print("[YOLO] General model ready", flush=True)
         return model
     except KeyboardInterrupt:
         print("[YOLO] Load interrupted")
@@ -66,6 +122,132 @@ def get_model():
     except Exception as e:
         print(f"[YOLO] Failed to load: {e}")
         return None
+
+
+def get_weapon_model():
+    global weapon_model
+    if not weapon_weights_path:
+        return None
+    if weapon_model is not None:
+        return weapon_model
+    try:
+        from ultralytics import YOLO
+        print(f"[YOLO] Loading weapon model from {weapon_weights_path}...", flush=True)
+        weapon_model = YOLO(weapon_weights_path)
+        print("[YOLO] Weapon model ready", flush=True)
+        return weapon_model
+    except KeyboardInterrupt:
+        print("[YOLO] Weapon model load interrupted")
+        return None
+    except Exception as e:
+        print(f"[YOLO] Weapon model unavailable: {e}")
+        return None
+
+
+def get_phone_model():
+    global phone_model
+    if not phone_weights_path:
+        return None
+    if phone_model is not None:
+        return phone_model
+    try:
+        from ultralytics import YOLO
+        print(f"[YOLO] Loading phone model from {phone_weights_path}...", flush=True)
+        phone_model = YOLO(phone_weights_path)
+        print("[YOLO] Phone model ready", flush=True)
+        return phone_model
+    except KeyboardInterrupt:
+        print("[YOLO] Phone model load interrupted")
+        return None
+    except Exception as e:
+        print(f"[YOLO] Phone model unavailable: {e}")
+        return None
+
+
+def get_hf_detector_pipe():
+    global hf_detector_pipe, hf_image_processor, hf_object_model, hf_backend_failed
+
+    if hf_backend_failed:
+        return None
+    if hf_detector_pipe is not None:
+        return hf_detector_pipe
+
+    try:
+        import torch
+        from transformers import pipeline, AutoImageProcessor, AutoModelForObjectDetection
+
+        device = 0 if torch.cuda.is_available() else -1
+        print(f"[HF] Loading object-detection model from {HF_OBJECT_DETECTION_MODEL_ID}...", flush=True)
+
+        hf_image_processor = AutoImageProcessor.from_pretrained(HF_OBJECT_DETECTION_MODEL_ID)
+        hf_object_model = AutoModelForObjectDetection.from_pretrained(HF_OBJECT_DETECTION_MODEL_ID)
+        try:
+            hf_detector_pipe = pipeline(
+                'object-detection',
+                model=hf_object_model,
+                image_processor=hf_image_processor,
+                device=device,
+            )
+        except TypeError:
+            # Backward-compatible fallback for older transformers pipeline signatures.
+            hf_detector_pipe = pipeline('object-detection', model=HF_OBJECT_DETECTION_MODEL_ID, device=device)
+
+        print("[HF] Object-detection model ready", flush=True)
+        return hf_detector_pipe
+    except KeyboardInterrupt:
+        print("[HF] Model load interrupted")
+        hf_backend_failed = True
+        return None
+    except Exception as exc:
+        print(f"[HF] Model unavailable: {exc}")
+        hf_backend_failed = True
+        return None
+
+
+def _run_hf_detection_inference(frame):
+    hf_pipe = get_hf_detector_pipe()
+    if hf_pipe is None:
+        return None
+
+    try:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(rgb)
+        raw = hf_pipe(pil_image, threshold=max(0.01, min(0.95, HF_DETECTION_THRESHOLD)))
+    except Exception as exc:
+        print(f"[HF] Inference failed: {exc}")
+        return None
+
+    parsed = []
+    for detection in raw or []:
+        score = float(detection.get('score', 0.0))
+        if score < HF_POST_CONF_MIN:
+            continue
+
+        box = detection.get('box') or {}
+        x1 = int(round(float(box.get('xmin', 0))))
+        y1 = int(round(float(box.get('ymin', 0))))
+        x2 = int(round(float(box.get('xmax', 0))))
+        y2 = int(round(float(box.get('ymax', 0))))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        raw_label = str(detection.get('label', '')).strip()
+        class_key = _normalize_label(raw_label)
+        if class_key in {'pistol', 'rifle', 'shotgun', 'handgun', 'firearm'}:
+            class_key = 'gun'
+
+        if not DETECTION_MATCH_ALL and class_key and class_key not in DESIRED_CLASSES and not _is_anomaly_target(class_key):
+            continue
+
+        class_name = 'phone' if class_key == 'phone' else (class_key or raw_label.lower())
+        parsed.append({
+            'class': class_name,
+            'confidence': score,
+            'bbox': (x1, y1, x2, y2),
+            'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
+        })
+
+    return parsed
 
 # Global variables for motion detection
 prev_frame = None
@@ -148,9 +330,6 @@ def _restore_session_from_remember_cookie() -> bool:
     finally:
         conn.close()
 
-# Get the directory where main.py is located
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'static', 'videos')
 app.config['LOWLIGHT_FOLDER'] = os.path.join(BASE_DIR, 'static', 'lowlight_uploads')
 app.config['ALLOWED_EXTENSIONS'] = {'mp4', 'avi', 'mov', 'mkv'}
@@ -158,11 +337,34 @@ app.config['ALLOWED_IMAGES'] = {'jpg', 'jpeg', 'png', 'bmp'}
 
 
 def _parse_label_set(raw_value: str) -> set[str]:
-    return {s.strip().lower() for s in (raw_value or '').split(',') if s.strip()}
+    aliases = {
+        'cell phone': 'phone',
+        'cellphone': 'phone',
+        'mobile phone': 'phone',
+        'mobile': 'phone',
+        'phones': 'phone',
+        'smartphone': 'phone',
+        'handgun': 'gun',
+        'firearm': 'gun',
+        'pistol': 'gun',
+        'rifle': 'gun',
+        'shotgun': 'gun',
+        'human': 'person',
+        'man': 'person',
+        'woman': 'person',
+    }
+    parsed = set()
+    for s in (raw_value or '').split(','):
+        normalized = str(s or '').strip().lower().replace('_', ' ').replace('-', ' ')
+        normalized = ' '.join(normalized.split())
+        if not normalized:
+            continue
+        parsed.add(aliases.get(normalized, normalized))
+    return parsed
 
 
 DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
-IMPORTANT_CLASSES = _parse_label_set(os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife,gun')) or {'person', 'backpack', 'knife', 'gun'}
+IMPORTANT_CLASSES = _parse_label_set(os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife,gun,phone')) or {'person', 'backpack', 'knife', 'gun', 'phone'}
 ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
 
 # Anomaly detection classes (abnormal behaviors/objects)
@@ -192,10 +394,15 @@ DETECTION_SNAPSHOT_COOLDOWN_SEC = float(os.getenv('DETECTION_SNAPSHOT_COOLDOWN_S
 MOTION_MIN_CONTOUR_AREA = float(os.getenv('MOTION_MIN_CONTOUR_AREA', '850'))
 DETECTION_CONF_MIN = float(os.getenv('DETECTION_CONF_MIN', '0.35'))
 DETECTION_DISPLAY_CONF_MIN = float(os.getenv('DETECTION_DISPLAY_CONF_MIN', '0.22'))
+HF_DETECTION_THRESHOLD = float(os.getenv('HF_DETECTION_THRESHOLD', str(DETECTION_CONF_MIN)))
+HF_POST_CONF_MIN = float(os.getenv('HF_POST_CONF_MIN', str(min(DETECTION_CONF_MIN, HF_DETECTION_THRESHOLD, 0.18))))
+HF_AUGMENT_WITH_YOLO = str(os.getenv('HF_AUGMENT_WITH_YOLO', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+HF_FUSION_INCLUDE_GENERAL = str(os.getenv('HF_FUSION_INCLUDE_GENERAL', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+STREAM_DETECTION_BACKEND = (os.getenv('STREAM_DETECTION_BACKEND', 'ultralytics') or 'ultralytics').strip().lower()
 TRACK_IOU_THRESHOLD = float(os.getenv('TRACK_IOU_THRESHOLD', '0.32'))
 TRACK_BBOX_EMA_ALPHA = float(os.getenv('TRACK_BBOX_EMA_ALPHA', '0.56'))
 TRACK_CONF_EMA_ALPHA = float(os.getenv('TRACK_CONF_EMA_ALPHA', '0.42'))
-TRACK_MIN_HITS = max(1, int(float(os.getenv('TRACK_MIN_HITS', '2'))))
+TRACK_MIN_HITS = max(1, int(float(os.getenv('TRACK_MIN_HITS', '1'))))
 TRACK_STALE_SEC = float(os.getenv('TRACK_STALE_SEC', '1.2'))
 TRACK_CONF_DECAY_PER_SEC = float(os.getenv('TRACK_CONF_DECAY_PER_SEC', '0.22'))
 DETECTION_LANE_WORKERS = max(1, min(3, int(float(os.getenv('DETECTION_LANE_WORKERS', '3')))))
@@ -203,9 +410,14 @@ ENABLE_DETECTION_SIDE_EFFECTS = str(os.getenv('ENABLE_DETECTION_SIDE_EFFECTS', '
 SAVE_DETECTION_FRAMES = str(os.getenv('SAVE_DETECTION_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 SAVE_ANOMALY_FRAMES = str(os.getenv('SAVE_ANOMALY_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
-DESIRED_CLASSES = {
-    'person', 'car', 'motorcycle', 'bicycle', 'bus', 'truck', 'knife', 'gun'
+DESIRED_CLASSES = _parse_label_set(os.getenv(
+    'DESIRED_CLASSES',
+    'person,car,motorcycle,bicycle,bus,truck,knife,gun,phone,backpack,book,bottle,laptop,mouse,remote,tv,chair,potted plant,dining table',
+)) or {
+    'person', 'car', 'motorcycle', 'bicycle', 'bus', 'truck', 'knife', 'gun', 'phone',
+    'backpack', 'book', 'bottle', 'laptop', 'mouse', 'remote', 'tv', 'chair', 'potted plant', 'dining table'
 }
+DETECTION_MATCH_ALL = bool(DESIRED_CLASSES.intersection({'*', 'all'}))
 PERSON_LANE_CLASSES = {'person'}
 WEAPON_LANE_CLASSES = {'knife', 'gun', 'weapon', 'pistol', 'rifle'}
 _lane_worker_count = max(1, DETECTION_LANE_WORKERS)
@@ -235,7 +447,25 @@ def allowed_image(filename):
 
 
 def _normalize_label(label: str) -> str:
-    return str(label or '').strip().lower()
+    normalized = str(label or '').strip().lower().replace('_', ' ').replace('-', ' ')
+    normalized = ' '.join(normalized.split())
+    aliases = {
+        'cell phone': 'phone',
+        'cellphone': 'phone',
+        'mobile phone': 'phone',
+        'mobile': 'phone',
+        'phones': 'phone',
+        'smartphone': 'phone',
+        'handgun': 'gun',
+        'firearm': 'gun',
+        'pistol': 'gun',
+        'rifle': 'gun',
+        'shotgun': 'gun',
+        'human': 'person',
+        'man': 'person',
+        'woman': 'person',
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _is_anomaly_target(class_name: str) -> bool:
@@ -645,32 +875,111 @@ class SimpleObjectTracker:
         return active
 
 
-def _run_detection_inference(frame):
-    m = get_model()
-    if m is None:
+def _run_detection_inference(frame, backend_override: str | None = None):
+    active_backend = str(backend_override or DETECTION_BACKEND or 'ultralytics').strip().lower()
+    if active_backend in {'default', 'same', 'app'}:
+        active_backend = DETECTION_BACKEND
+
+    def _parse_boxes(active_model, active_results, phone_only: bool = False, weapon_only: bool = False):
+        out = []
+        if not active_model or not active_results:
+            return out
+        for detection in active_results[0].boxes:
+            x1 = int(detection.xyxy[0][0])
+            y1 = int(detection.xyxy[0][1])
+            x2 = int(detection.xyxy[0][2])
+            y2 = int(detection.xyxy[0][3])
+            conf = float(detection.conf[0])
+            if conf < DETECTION_CONF_MIN:
+                continue
+            cls = int(detection.cls[0])
+            class_name = active_model.names[int(cls)]
+            class_key = _normalize_label(class_name)
+
+            if phone_only and class_key != 'phone':
+                continue
+
+            if weapon_only and class_key not in WEAPON_LANE_CLASSES and class_key not in {'knife', 'gun'}:
+                continue
+
+            if not DETECTION_MATCH_ALL and class_key and class_key not in DESIRED_CLASSES and not _is_anomaly_target(class_name):
+                continue
+
+            if class_key in {'pistol', 'rifle', 'shotgun', 'handgun', 'firearm'}:
+                class_name = 'gun'
+            elif class_key == 'phone':
+                class_name = 'phone'
+
+            out.append({
+                'class': class_name,
+                'confidence': conf,
+                'bbox': (x1, y1, x2, y2),
+                'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
+            })
+        return out
+
+    def _merge_detections(base: list[dict], incoming: list[dict]) -> list[dict]:
+        merged = list(base)
+        for new_det in incoming:
+            replace_idx = None
+            for idx, existing in enumerate(merged):
+                if _normalize_label(existing.get('class', '')) != _normalize_label(new_det.get('class', '')):
+                    continue
+                if _bbox_iou(existing.get('bbox', (0, 0, 0, 0)), new_det.get('bbox', (0, 0, 0, 0))) >= 0.55:
+                    replace_idx = idx
+                    break
+
+            if replace_idx is None:
+                merged.append(new_det)
+            elif float(new_det.get('confidence', 0.0)) > float(merged[replace_idx].get('confidence', 0.0)):
+                merged[replace_idx] = new_det
+        return merged
+
+    parsed = []
+    hf_active = False
+
+    if active_backend in HF_BACKEND_ALIASES:
+        hf_parsed = _run_hf_detection_inference(frame)
+        if hf_parsed is not None:
+            hf_active = True
+            parsed = list(hf_parsed)
+            if not HF_AUGMENT_WITH_YOLO:
+                return parsed
+        else:
+            print('[HF] Falling back to Ultralytics ensemble backend.')
+
+    include_general = (not hf_active) or HF_FUSION_INCLUDE_GENERAL
+    general_m = get_model() if include_general else None
+    if include_general and general_m is None and not parsed:
         return []
 
-    results = m(frame, verbose=False)
-    parsed = []
-    for detection in results[0].boxes:
-        x1 = int(detection.xyxy[0][0])
-        y1 = int(detection.xyxy[0][1])
-        x2 = int(detection.xyxy[0][2])
-        y2 = int(detection.xyxy[0][3])
-        conf = float(detection.conf[0])
-        if conf < DETECTION_CONF_MIN:
-            continue
-        cls = int(detection.cls[0])
-        class_name = m.names[int(cls)]
-        class_key = _normalize_label(class_name)
-        if class_key and class_key not in DESIRED_CLASSES and not _is_anomaly_target(class_name):
-            continue
-        parsed.append({
-            'class': class_name,
-            'confidence': conf,
-            'bbox': (x1, y1, x2, y2),
-            'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
-        })
+    general_results = None
+    if general_m is not None:
+        try:
+            general_results = general_m(frame, verbose=False)
+        except Exception as e:
+            print(f"[YOLO] general model inference failed: {e}")
+
+    weapon_m = get_weapon_model()
+    weapon_results = None
+    if weapon_m is not None and weapon_m is not general_m:
+        try:
+            weapon_results = weapon_m(frame, verbose=False)
+        except Exception as e:
+            print(f"[YOLO] weapon model inference failed: {e}")
+
+    phone_m = get_phone_model()
+    phone_results = None
+    if phone_m is not None and phone_m is not general_m:
+        try:
+            phone_results = phone_m(frame, verbose=False)
+        except Exception as e:
+            print(f"[YOLO] phone model inference failed: {e}")
+
+    parsed = _merge_detections(parsed, _parse_boxes(general_m, general_results, phone_only=False, weapon_only=False))
+    parsed = _merge_detections(parsed, _parse_boxes(weapon_m, weapon_results, phone_only=False, weapon_only=True))
+    parsed = _merge_detections(parsed, _parse_boxes(phone_m, phone_results, phone_only=True, weapon_only=False))
+
     return parsed
 
 
@@ -980,7 +1289,7 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
         track_hits = int(detection.get('track_hits', 1))
         track_age_sec = float(detection.get('track_age_sec', 0.0))
 
-        if class_key not in DESIRED_CLASSES:
+        if not DETECTION_MATCH_ALL and class_key not in DESIRED_CLASSES and not _is_anomaly_target(class_name):
             continue
 
         # Ignore weak stale tracks so visuals remain stable and meaningful.
@@ -1281,7 +1590,10 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 continue
 
             infer_start = time.perf_counter()
-            raw_detections = _run_detection_inference(pending_frame)
+            raw_detections = _run_detection_inference(
+                pending_frame,
+                backend_override=STREAM_DETECTION_BACKEND,
+            )
             lane_results = _run_detection_lanes(raw_detections)
             merged_detections = lane_results['object'] + lane_results['person'] + lane_results['weapon']
             tracked_detections = tracker.update(merged_detections, now=now)
