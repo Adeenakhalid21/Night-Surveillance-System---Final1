@@ -349,6 +349,17 @@ def _parse_label_set(raw_value: str) -> set[str]:
         'pistol': 'gun',
         'rifle': 'gun',
         'shotgun': 'gun',
+        'automatic rifle': 'gun',
+        'smg': 'gun',
+        'sniper': 'gun',
+        'bazooka': 'gun',
+        'grenade launcher': 'gun',
+        'grenade': 'gun',
+        'launcher': 'gun',
+        'sword': 'knife',
+        'blade': 'knife',
+        'dagger': 'knife',
+        'machete': 'knife',
         'human': 'person',
         'man': 'person',
         'woman': 'person',
@@ -394,6 +405,9 @@ DETECTION_SNAPSHOT_COOLDOWN_SEC = float(os.getenv('DETECTION_SNAPSHOT_COOLDOWN_S
 MOTION_MIN_CONTOUR_AREA = float(os.getenv('MOTION_MIN_CONTOUR_AREA', '850'))
 DETECTION_CONF_MIN = float(os.getenv('DETECTION_CONF_MIN', '0.35'))
 DETECTION_DISPLAY_CONF_MIN = float(os.getenv('DETECTION_DISPLAY_CONF_MIN', '0.22'))
+WEAPON_CONF_MIN = float(os.getenv('WEAPON_CONF_MIN', str(min(DETECTION_CONF_MIN, 0.18))))
+KNIFE_CONF_MIN = float(os.getenv('KNIFE_CONF_MIN', str(WEAPON_CONF_MIN)))
+GUN_CONF_MIN = float(os.getenv('GUN_CONF_MIN', str(WEAPON_CONF_MIN)))
 HF_DETECTION_THRESHOLD = float(os.getenv('HF_DETECTION_THRESHOLD', str(DETECTION_CONF_MIN)))
 HF_POST_CONF_MIN = float(os.getenv('HF_POST_CONF_MIN', str(min(DETECTION_CONF_MIN, HF_DETECTION_THRESHOLD, 0.18))))
 HF_AUGMENT_WITH_YOLO = str(os.getenv('HF_AUGMENT_WITH_YOLO', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
@@ -461,6 +475,17 @@ def _normalize_label(label: str) -> str:
         'pistol': 'gun',
         'rifle': 'gun',
         'shotgun': 'gun',
+        'automatic rifle': 'gun',
+        'smg': 'gun',
+        'sniper': 'gun',
+        'bazooka': 'gun',
+        'grenade launcher': 'gun',
+        'grenade': 'gun',
+        'launcher': 'gun',
+        'sword': 'knife',
+        'blade': 'knife',
+        'dagger': 'knife',
+        'machete': 'knife',
         'human': 'person',
         'man': 'person',
         'woman': 'person',
@@ -890,11 +915,21 @@ def _run_detection_inference(frame, backend_override: str | None = None):
             x2 = int(detection.xyxy[0][2])
             y2 = int(detection.xyxy[0][3])
             conf = float(detection.conf[0])
-            if conf < DETECTION_CONF_MIN:
-                continue
             cls = int(detection.cls[0])
             class_name = active_model.names[int(cls)]
             class_key = _normalize_label(class_name)
+
+            required_conf = DETECTION_CONF_MIN
+            if weapon_only:
+                if class_key == 'knife':
+                    required_conf = KNIFE_CONF_MIN
+                elif class_key in {'gun', 'pistol', 'rifle', 'shotgun', 'handgun', 'firearm'}:
+                    required_conf = GUN_CONF_MIN
+                else:
+                    required_conf = WEAPON_CONF_MIN
+
+            if conf < required_conf:
+                continue
 
             if phone_only and class_key != 'phone':
                 continue
