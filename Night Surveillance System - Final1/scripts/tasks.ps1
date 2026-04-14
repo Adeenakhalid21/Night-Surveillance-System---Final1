@@ -173,4 +173,39 @@ function Use-App-Weights {
   Write-Host "Set YOLO_WEIGHTS to $env:YOLO_WEIGHTS"
 }
 
-Write-Host "Loaded tasks.ps1. Available commands: Register-LOL, Start-LOLTrainingFast, Start-LOLTrainingFull, Register-COCO-Full, Start-COCOTraining5K, Start-HandWeaponTraining, Use-HandWeaponWeights, Use-App-Weights"
+function Start-ObjectPersonWeaponTraining {
+  param(
+    [string]$RunName = "object_person_weapon_ft",
+    [int]$Epochs = 20,
+    [string]$Weights = "auto"
+  )
+  $root = Get-RepoRoot
+  $inner = Get-InnerPath
+  $py = Get-VenvPython -RepoRoot $root
+  $script = Join-Path $inner "scripts\train_object_person_weapon_model.py"
+  $personSource = Join-Path $inner "datasets\prepared\coco_full5k_pseudo"
+  $weaponSource = Join-Path $inner "datasets\prepared\gun_knife_binary"
+  $outPath = Join-Path $inner "datasets\prepared\object_person_weapon"
+
+  & $py $script `
+    --person-source $personSource `
+    --weapon-source $weaponSource `
+    --out $outPath `
+    --weights $Weights `
+    --epochs $Epochs --batch 10 --imgsz 512 `
+    --device cpu --workers 0 --patience 6 --freeze 6 `
+    --name $RunName
+}
+
+function Use-ObjectPersonWeaponWeights {
+  param([string]$RunName = "object_person_weapon_ft")
+  $env:YOLO_WEIGHTS = "runs\detect\$RunName\weights\best.pt"
+  $env:IMPORTANT_CLASSES = "person,knife,gun,backpack,car,motorcycle,bus,truck"
+  $env:ANOMALY_CLASSES = "knife,gun,weapon,intruder"
+  $env:SAVE_DETECTION_FRAMES = "0"
+  $env:SAVE_ANOMALY_FRAMES = "0"
+  Write-Host "Set YOLO_WEIGHTS to $env:YOLO_WEIGHTS"
+  Write-Host "Frame saving disabled for realtime speed (SAVE_DETECTION_FRAMES=0, SAVE_ANOMALY_FRAMES=0)."
+}
+
+Write-Host "Loaded tasks.ps1. Available commands: Register-LOL, Start-LOLTrainingFast, Start-LOLTrainingFull, Register-COCO-Full, Start-COCOTraining5K, Start-HandWeaponTraining, Use-HandWeaponWeights, Start-ObjectPersonWeaponTraining, Use-ObjectPersonWeaponWeights, Use-App-Weights"

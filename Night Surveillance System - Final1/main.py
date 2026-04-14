@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 from flask import Flask, render_template, Response, request, jsonify, redirect, url_for, session
 import sqlite3
 import re, os
@@ -14,6 +15,8 @@ import threading
 import time
 from datetime import timedelta
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import uuid
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.utils import secure_filename
@@ -30,6 +33,7 @@ def resolve_default_weights() -> str:
         print(f"[YOLO] configured weights not found: {env_weights}, using best available local checkpoint")
 
     candidates = [
+        "runs/detect/object_person_weapon_ft/weights/best.pt",
         "runs/detect/gun_knife_finetune_v4/weights/best.pt",
         "runs/detect/gun_knife_hand_ft/weights/best.pt",
         "runs/detect/dataset2_weapon_detection_best.pt",
@@ -82,6 +86,10 @@ detection_last_snapshot_emit = {}
 # Async image enhancement jobs
 enhancement_jobs = {}
 enhancement_jobs_lock = threading.Lock()
+
+# Uploaded video processing sessions and summary metrics
+upload_video_sessions = {}
+upload_video_sessions_lock = threading.Lock()
 
 # Initialize Flask application
 app = Flask(__name__)
@@ -170,6 +178,12 @@ STREAM_FRAME_WIDTH = int(float(os.getenv('STREAM_FRAME_WIDTH', '640')))
 STREAM_FRAME_HEIGHT = int(float(os.getenv('STREAM_FRAME_HEIGHT', '480')))
 STREAM_GRAB_SKIP = max(0, int(float(os.getenv('STREAM_GRAB_SKIP', '1'))))
 STREAM_JPEG_QUALITY = int(max(50, min(95, float(os.getenv('STREAM_JPEG_QUALITY', '75')))))
+STREAM_GRAPH_PANEL_WIDTH = int(float(os.getenv('STREAM_GRAPH_PANEL_WIDTH', '270')))
+STREAM_METRIC_HISTORY = max(20, int(float(os.getenv('STREAM_METRIC_HISTORY', '90'))))
+
+UPLOAD_VIDEO_GRAPH_POINTS = max(40, int(float(os.getenv('UPLOAD_VIDEO_GRAPH_POINTS', '120'))))
+UPLOAD_VIDEO_CONTEXT_CLASS_LIMIT = max(3, int(float(os.getenv('UPLOAD_VIDEO_CONTEXT_CLASS_LIMIT', '5'))))
+LOWLIGHT_MAX_SIDE = max(320, int(float(os.getenv('LOWLIGHT_MAX_SIDE', '960'))))
 
 DETECTION_MIN_INTERVAL_SEC = float(os.getenv('DETECTION_MIN_INTERVAL_SEC', '0.35'))
 DETECTION_DB_COOLDOWN_SEC = float(os.getenv('DETECTION_DB_COOLDOWN_SEC', '2.0'))
@@ -184,10 +198,18 @@ TRACK_CONF_EMA_ALPHA = float(os.getenv('TRACK_CONF_EMA_ALPHA', '0.42'))
 TRACK_MIN_HITS = max(1, int(float(os.getenv('TRACK_MIN_HITS', '2'))))
 TRACK_STALE_SEC = float(os.getenv('TRACK_STALE_SEC', '1.2'))
 TRACK_CONF_DECAY_PER_SEC = float(os.getenv('TRACK_CONF_DECAY_PER_SEC', '0.22'))
+DETECTION_LANE_WORKERS = max(1, min(3, int(float(os.getenv('DETECTION_LANE_WORKERS', '3')))))
+ENABLE_DETECTION_SIDE_EFFECTS = str(os.getenv('ENABLE_DETECTION_SIDE_EFFECTS', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+SAVE_DETECTION_FRAMES = str(os.getenv('SAVE_DETECTION_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+SAVE_ANOMALY_FRAMES = str(os.getenv('SAVE_ANOMALY_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
 DESIRED_CLASSES = {
     'person', 'car', 'motorcycle', 'bicycle', 'bus', 'truck', 'knife', 'gun'
 }
+PERSON_LANE_CLASSES = {'person'}
+WEAPON_LANE_CLASSES = {'knife', 'gun', 'weapon', 'pistol', 'rifle'}
+_lane_worker_count = max(1, DETECTION_LANE_WORKERS)
+detection_lane_pool = ThreadPoolExecutor(max_workers=_lane_worker_count, thread_name_prefix='det-lane')
 
 
 @app.before_request
@@ -261,6 +283,203 @@ def _allow_with_cooldown(bucket: dict, key: str, cooldown_sec: float) -> bool:
             return False
         bucket[key] = now
         return True
+
+
+def _trim_graph_series(series: list, limit: int = UPLOAD_VIDEO_GRAPH_POINTS) -> None:
+    overflow = len(series) - max(1, int(limit))
+    if overflow > 0:
+        del series[:overflow]
+
+
+def _top_counts(counter: dict, limit: int = UPLOAD_VIDEO_CONTEXT_CLASS_LIMIT) -> list[dict]:
+    ordered = sorted(counter.items(), key=lambda item: int(item[1]), reverse=True)
+    return [
+        {'label': str(label), 'count': int(count)}
+        for label, count in ordered[:max(1, int(limit))]
+    ]
+
+
+def _build_upload_video_context(session_data: dict) -> dict:
+    frames_processed = int(session_data.get('frames_processed', 0))
+    total_anomalies = int(session_data.get('total_anomalies', 0))
+    anomaly_rate = (total_anomalies / frames_processed) if frames_processed else 0.0
+
+    if total_anomalies >= 20 or anomaly_rate >= 0.35:
+        risk_level = 'high'
+    elif total_anomalies >= 8 or anomaly_rate >= 0.15:
+        risk_level = 'medium'
+    else:
+        risk_level = 'low'
+
+    if total_anomalies <= 0:
+        narrative = 'No anomaly events were detected in this upload.'
+    elif risk_level == 'high':
+        narrative = 'High anomaly density detected. Review this video immediately.'
+    elif risk_level == 'medium':
+        narrative = 'Moderate anomaly activity detected. Manual review is recommended.'
+    else:
+        narrative = 'Low anomaly activity detected. Continue routine monitoring.'
+
+    return {
+        'risk_level': risk_level,
+        'anomaly_rate_percent': round(anomaly_rate * 100.0, 2),
+        'top_detected_classes': _top_counts(session_data.get('class_counts', {})),
+        'top_anomaly_classes': _top_counts(session_data.get('anomaly_counts', {})),
+        'narrative': narrative,
+    }
+
+
+def _register_upload_video_session(video_id: str, original_name: str, stored_name: str, absolute_path: str) -> None:
+    with upload_video_sessions_lock:
+        upload_video_sessions[video_id] = {
+            'video_id': video_id,
+            'video_name': original_name,
+            'stored_name': stored_name,
+            'absolute_video_path': absolute_path,
+            'status': 'ready',
+            'created_at': time.time(),
+            'started_at': None,
+            'completed_at': None,
+            'updated_at': time.time(),
+            'frames_processed': 0,
+            'total_detections': 0,
+            'total_anomalies': 0,
+            'peak_detections': 0,
+            'peak_anomalies': 0,
+            'sum_inference_ms': 0.0,
+            'sum_fps': 0.0,
+            'max_confidence': 0.0,
+            'class_counts': {},
+            'anomaly_counts': {},
+            'graph': {
+                'labels': [],
+                'detections': [],
+                'anomalies': [],
+                'persons': [],
+                'weapons': [],
+                'objects': [],
+                'inference_ms': [],
+                'fps': [],
+            },
+            'error': '',
+        }
+
+
+def _reset_upload_video_session_metrics(session_data: dict) -> None:
+    session_data['frames_processed'] = 0
+    session_data['total_detections'] = 0
+    session_data['total_anomalies'] = 0
+    session_data['peak_detections'] = 0
+    session_data['peak_anomalies'] = 0
+    session_data['sum_inference_ms'] = 0.0
+    session_data['sum_fps'] = 0.0
+    session_data['max_confidence'] = 0.0
+    session_data['class_counts'] = {}
+    session_data['anomaly_counts'] = {}
+    session_data['graph'] = {
+        'labels': [],
+        'detections': [],
+        'anomalies': [],
+        'persons': [],
+        'weapons': [],
+        'objects': [],
+        'inference_ms': [],
+        'fps': [],
+    }
+
+
+def _mark_upload_video_session_started(video_id: str) -> None:
+    with upload_video_sessions_lock:
+        session_data = upload_video_sessions.get(video_id)
+        if not session_data:
+            return
+        _reset_upload_video_session_metrics(session_data)
+        session_data['status'] = 'processing'
+        session_data['started_at'] = time.time()
+        session_data['completed_at'] = None
+        session_data['error'] = ''
+        session_data['updated_at'] = time.time()
+
+
+def _update_upload_video_session(
+    video_id: str,
+    metrics: dict,
+    tracked_detections: list[dict],
+    anomalies: list[dict],
+) -> None:
+    with upload_video_sessions_lock:
+        session_data = upload_video_sessions.get(video_id)
+        if not session_data:
+            return
+
+        frames_processed = int(session_data.get('frames_processed', 0)) + 1
+        total_count = int(metrics.get('total_count', len(tracked_detections)))
+        anomaly_count = int(metrics.get('anomaly_count', len(anomalies)))
+        inference_ms = float(metrics.get('inference_ms', 0.0))
+        stream_fps = float(metrics.get('fps', 0.0))
+
+        session_data['frames_processed'] = frames_processed
+        session_data['total_detections'] = int(session_data.get('total_detections', 0)) + total_count
+        session_data['total_anomalies'] = int(session_data.get('total_anomalies', 0)) + anomaly_count
+        session_data['peak_detections'] = max(int(session_data.get('peak_detections', 0)), total_count)
+        session_data['peak_anomalies'] = max(int(session_data.get('peak_anomalies', 0)), anomaly_count)
+        session_data['sum_inference_ms'] = float(session_data.get('sum_inference_ms', 0.0)) + inference_ms
+        session_data['sum_fps'] = float(session_data.get('sum_fps', 0.0)) + stream_fps
+
+        max_conf = max([float(det.get('confidence', 0.0)) for det in tracked_detections] + [0.0])
+        session_data['max_confidence'] = max(float(session_data.get('max_confidence', 0.0)), max_conf)
+
+        class_counts = session_data.setdefault('class_counts', {})
+        for det in tracked_detections:
+            label = _normalize_label(det.get('class', '')) or 'unknown'
+            class_counts[label] = int(class_counts.get(label, 0)) + 1
+
+        anomaly_counts = session_data.setdefault('anomaly_counts', {})
+        for anomaly in anomalies:
+            label = _normalize_label(anomaly.get('class', '')) or 'unknown'
+            anomaly_counts[label] = int(anomaly_counts.get(label, 0)) + 1
+
+        graph = session_data.setdefault('graph', {})
+        labels = graph.setdefault('labels', [])
+        detections_series = graph.setdefault('detections', [])
+        anomalies_series = graph.setdefault('anomalies', [])
+        persons_series = graph.setdefault('persons', [])
+        weapons_series = graph.setdefault('weapons', [])
+        objects_series = graph.setdefault('objects', [])
+        inference_series = graph.setdefault('inference_ms', [])
+        fps_series = graph.setdefault('fps', [])
+
+        labels.append(str(frames_processed))
+        detections_series.append(total_count)
+        anomalies_series.append(anomaly_count)
+        persons_series.append(int(metrics.get('person_count', 0)))
+        weapons_series.append(int(metrics.get('weapon_count', 0)))
+        objects_series.append(int(metrics.get('object_count', 0)))
+        inference_series.append(round(inference_ms, 2))
+        fps_series.append(round(stream_fps, 2))
+
+        _trim_graph_series(labels)
+        _trim_graph_series(detections_series)
+        _trim_graph_series(anomalies_series)
+        _trim_graph_series(persons_series)
+        _trim_graph_series(weapons_series)
+        _trim_graph_series(objects_series)
+        _trim_graph_series(inference_series)
+        _trim_graph_series(fps_series)
+
+        session_data['updated_at'] = time.time()
+
+
+def _finalize_upload_video_session(video_id: str, status: str = 'completed', error_message: str = '') -> None:
+    with upload_video_sessions_lock:
+        session_data = upload_video_sessions.get(video_id)
+        if not session_data:
+            return
+        session_data['status'] = status
+        session_data['completed_at'] = time.time()
+        session_data['updated_at'] = time.time()
+        if error_message:
+            session_data['error'] = error_message
 
 
 def _bbox_iou(box_a, box_b) -> float:
@@ -455,6 +674,152 @@ def _run_detection_inference(frame):
     return parsed
 
 
+def _lane_name_for_class(class_name: str) -> str:
+    class_key = _normalize_label(class_name)
+    if class_key in PERSON_LANE_CLASSES:
+        return 'person'
+    if class_key in WEAPON_LANE_CLASSES:
+        return 'weapon'
+    return 'object'
+
+
+def _collect_lane_detections(detections: list[dict], lane_name: str) -> list[dict]:
+    lane_detections = []
+    for detection in detections or []:
+        if _lane_name_for_class(detection.get('class', '')) != lane_name:
+            continue
+        det_copy = dict(detection)
+        det_copy['lane'] = lane_name
+        lane_detections.append(det_copy)
+    return lane_detections
+
+
+def _run_detection_lanes(detections: list[dict]) -> dict[str, list[dict]]:
+    if not detections:
+        return {'object': [], 'person': [], 'weapon': []}
+
+    if DETECTION_LANE_WORKERS <= 1:
+        return {
+            'object': _collect_lane_detections(detections, 'object'),
+            'person': _collect_lane_detections(detections, 'person'),
+            'weapon': _collect_lane_detections(detections, 'weapon'),
+        }
+
+    futures = {
+        lane: detection_lane_pool.submit(_collect_lane_detections, detections, lane)
+        for lane in ('object', 'person', 'weapon')
+    }
+
+    lane_results = {}
+    for lane, future in futures.items():
+        try:
+            lane_results[lane] = future.result(timeout=1.2)
+        except Exception:
+            lane_results[lane] = _collect_lane_detections(detections, lane)
+
+    return lane_results
+
+
+def _count_detection_groups(detections: list[dict]) -> dict[str, int]:
+    counts = {'object': 0, 'person': 0, 'weapon': 0}
+    for detection in detections or []:
+        lane = _lane_name_for_class(detection.get('class', ''))
+        counts[lane] = counts.get(lane, 0) + 1
+    return counts
+
+
+def _collect_anomaly_detections(detections: list[dict]) -> list[dict]:
+    anomalies_detected = []
+    for detection in detections or []:
+        x1, y1, x2, y2 = detection['bbox']
+        conf = float(detection['confidence'])
+        class_name = detection['class']
+        bbox_area = int(detection.get('bbox_area', max(0, x2 - x1) * max(0, y2 - y1)))
+
+        if conf >= ANOMALY_CONF_MIN and bbox_area >= ANOMALY_MIN_BOX_AREA and _is_anomaly_target(class_name):
+            anomalies_detected.append({
+                'class': class_name,
+                'confidence': conf,
+                'bbox': (x1, y1, x2, y2)
+            })
+    return anomalies_detected
+
+
+def _draw_sparkline(panel: np.ndarray, values, x: int, y: int, width: int, height: int, color, title: str) -> None:
+    cv2.rectangle(panel, (x, y), (x + width, y + height), (52, 66, 89), 1)
+    cv2.putText(panel, title, (x + 2, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (186, 204, 232), 1)
+
+    series = np.array(list(values), dtype=np.float32)
+    if series.size < 2:
+        return
+
+    max_value = float(np.max(series))
+    min_value = float(np.min(series))
+    if max_value - min_value < 1e-6:
+        max_value = min_value + 1.0
+
+    points = []
+    span = max(1, int(series.size - 1))
+    for idx, value in enumerate(series):
+        px = int(x + ((idx / span) * (width - 1)))
+        normalized = (value - min_value) / (max_value - min_value)
+        py = int(y + height - 1 - (normalized * (height - 1)))
+        points.append((px, py))
+
+    if len(points) >= 2:
+        cv2.polylines(panel, [np.array(points, dtype=np.int32)], False, color, 2, cv2.LINE_AA)
+
+
+def _append_realtime_metrics_panel(frame: np.ndarray, metrics: dict, history: dict) -> np.ndarray:
+    if frame is None or frame.size == 0:
+        return frame
+
+    height, width = frame.shape[:2]
+    panel_width = max(220, STREAM_GRAPH_PANEL_WIDTH)
+    canvas = np.zeros((height, width + panel_width, 3), dtype=np.uint8)
+    canvas[:, :width] = frame
+
+    panel = canvas[:, width:]
+    panel[:] = (17, 21, 30)
+    cv2.rectangle(panel, (0, 0), (panel_width - 1, height - 1), (51, 67, 95), 2)
+
+    fps = float(metrics.get('fps', 0.0))
+    infer_ms = float(metrics.get('inference_ms', 0.0))
+    total_count = int(metrics.get('detections_total', 0))
+    object_count = int(metrics.get('object_count', 0))
+    person_count = int(metrics.get('person_count', 0))
+    weapon_count = int(metrics.get('weapon_count', 0))
+    motion_state = bool(metrics.get('motion_detected', False))
+
+    cv2.putText(panel, 'Realtime Detection', (14, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (235, 245, 255), 2)
+    cv2.putText(panel, f'FPS: {fps:5.1f}', (14, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (126, 244, 176), 1)
+    cv2.putText(panel, f'Infer: {infer_ms:5.1f} ms', (14, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (121, 194, 255), 1)
+    cv2.putText(panel, f'Detections: {total_count}', (14, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (252, 226, 136), 1)
+    cv2.putText(panel, f'Motion: {"Yes" if motion_state else "No"}', (14, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 168, 123), 1)
+
+    bar_y = 188
+    bar_max = 70
+    bars = [
+        ('Obj', object_count, (94, 158, 255)),
+        ('Per', person_count, (120, 235, 148)),
+        ('Wpn', weapon_count, (120, 120, 255)),
+    ]
+    for idx, (label, count, color) in enumerate(bars):
+        x0 = 20 + (idx * 70)
+        bar_h = min(bar_max, int(count * 14))
+        cv2.rectangle(panel, (x0, bar_y - bar_h), (x0 + 32, bar_y), color, -1)
+        cv2.rectangle(panel, (x0, bar_y - bar_max), (x0 + 32, bar_y), (66, 82, 112), 1)
+        cv2.putText(panel, label, (x0, bar_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 215, 242), 1)
+        cv2.putText(panel, str(count), (x0, bar_y - bar_h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1)
+
+    spark_x = 14
+    spark_w = panel_width - 28
+    _draw_sparkline(panel, history.get('fps', []), spark_x, 236, spark_w, 58, (118, 245, 168), 'FPS')
+    _draw_sparkline(panel, history.get('inference_ms', []), spark_x, 320, spark_w, 58, (114, 200, 255), 'Inference (ms)')
+
+    return canvas
+
+
 def _new_enhancement_job(job_id: str) -> dict:
     stages = [
         {'key': item['key'], 'label': item['label'], 'status': 'pending'}
@@ -567,26 +932,17 @@ def detect_anomalies(frame, camera_id=1, detections=None):
     if not detections:
         return frame, []
 
-    anomalies_detected = []
+    anomalies_detected = _collect_anomaly_detections(detections)
 
-    for detection in detections:
-        x1, y1, x2, y2 = detection['bbox']
-        conf = float(detection['confidence'])
-        class_name = detection['class']
-        bbox_area = int(detection.get('bbox_area', max(0, x2 - x1) * max(0, y2 - y1)))
-        
-        # Check if detected class is in anomaly list
-        if conf >= ANOMALY_CONF_MIN and bbox_area >= ANOMALY_MIN_BOX_AREA and _is_anomaly_target(class_name):
-            anomalies_detected.append({
-                'class': class_name,
-                'confidence': conf,
-                'bbox': (x1, y1, x2, y2)
-            })
-            
-            # Draw red bounding box for anomalies
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-            label = f"ANOMALY: {class_name} {conf:.2f}"
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    for anomaly in anomalies_detected:
+        x1, y1, x2, y2 = anomaly['bbox']
+        conf = float(anomaly['confidence'])
+        class_name = anomaly['class']
+
+        # Draw red bounding box for anomalies
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        label = f"ANOMALY: {class_name} {conf:.2f}"
+        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
     
     return frame, anomalies_detected
 
@@ -604,7 +960,7 @@ def motion_detection(frame1, frame2):
     motion_detected = any(cv2.contourArea(c) >= MOTION_MIN_CONTOUR_AREA for c in contours)
 
 
-def detect_objects_and_classify(frame, camera_id=1, detections=None):
+def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_effects=True):
     if detections is None:
         detections = _run_detection_inference(frame)
 
@@ -646,6 +1002,9 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None):
         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
         cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
 
+        if not apply_side_effects:
+            continue
+
         needs_db = not DISABLE_DETECTION_DB and _allow_with_cooldown(
             detection_last_db_emit,
             f"{camera_id}:{class_key}",
@@ -657,7 +1016,7 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None):
             DETECTION_ALERT_COOLDOWN_SEC,
         )
 
-        needs_snapshot = needs_db or needs_alert
+        needs_snapshot = SAVE_DETECTION_FRAMES and (needs_db or needs_alert)
         detection_image_path = None
 
         if needs_snapshot:
@@ -800,25 +1159,46 @@ def send_email_alert(subject, body, to, att):
         print(f"Error sending email alert: {e}")
 
 # Video stream generator
-def video_stream(source, stop_event):
+def video_stream(source, stop_event, upload_video_id: str | None = None):
     global prev_frame, motion_detected
-    
+
     # Capture video from webcam/uploaded video and keep driver buffer shallow.
     cap = cv2.VideoCapture(source)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
-    
 
-    # Initialize previous frame
-    ret, prev_frame = cap.read()
-    if not ret:
-        print("Error: Could not read the initial frame.")
+    if not cap.isOpened():
+        print("Error: Could not open camera/video source.")
+        if upload_video_id:
+            _finalize_upload_video_session(upload_video_id, status='failed', error_message='Could not open video source.')
         return
-    
-    prev_frame = cv2.resize(prev_frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
-    last_detection_ts = 0.0
+
+    frame_state = {'frame': None, 'seq': 0}
+    frame_lock = threading.Lock()
+    frame_event = threading.Event()
+    capture_failed = threading.Event()
+
+    detection_request = {'frame': None, 'seq': 0}
+    detection_request_lock = threading.Lock()
+    detection_event = threading.Event()
+
+    detection_state = {
+        'tracked': [],
+        'anomalies': [],
+        'meta': {
+            'inference_ms': 0.0,
+            'total_count': 0,
+            'person_count': 0,
+            'weapon_count': 0,
+            'object_count': 0,
+            'source_seq': 0,
+            'updated_at': 0.0,
+        },
+    }
+    detection_state_lock = threading.Lock()
+
     tracker = SimpleObjectTracker(
         iou_threshold=TRACK_IOU_THRESHOLD,
         bbox_alpha=TRACK_BBOX_EMA_ALPHA,
@@ -829,107 +1209,292 @@ def video_stream(source, stop_event):
         conf_decay_per_sec=TRACK_CONF_DECAY_PER_SEC,
     )
 
-    while not stop_event.is_set() and cap.isOpened():
-        # Skip/grab frames without decoding all of them to reduce processing backlog.
-        for _ in range(STREAM_GRAB_SKIP):
-            cap.grab()
-
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Resize for consistent processing speed
-        frame = cv2.resize(frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
-
-        # Default: send raw frame (ensures stream never blanks)
-        output_frame = frame
-
-        if prev_frame is not None:
-            motion_detection(prev_frame, frame)
+    def capture_worker() -> None:
+        global prev_frame
+        while not stop_event.is_set() and cap.isOpened():
             try:
-                now = time.time()
-                should_run_detection = (now - last_detection_ts) >= DETECTION_MIN_INTERVAL_SEC
+                # Skip/grab frames without decoding all of them to reduce processing backlog.
+                for _ in range(STREAM_GRAB_SKIP):
+                    if not cap.grab():
+                        break
 
-                if should_run_detection:
-                    raw_detections = _run_detection_inference(frame)
-                    tracked_detections = tracker.update(raw_detections, now=now)
-                    last_detection_ts = now
-                else:
-                    tracked_detections = tracker.get_active_tracks(now=now)
+                ret, frame = cap.read()
+                if not ret:
+                    capture_failed.set()
+                    break
 
-                if tracked_detections:
-                    detection_frame = frame.copy()
-                    output_frame = detect_objects_and_classify(detection_frame, detections=tracked_detections)
-                    output_frame, anomalies = detect_anomalies(output_frame, detections=tracked_detections)
+                frame = cv2.resize(frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
+                with frame_lock:
+                    frame_state['frame'] = frame
+                    frame_state['seq'] = int(frame_state['seq']) + 1
+                frame_event.set()
 
-                    emitted_anomalies = []
-                    for anomaly in anomalies:
-                        if _enqueue_anomaly_event(anomaly['class'], anomaly['confidence']):
-                            emitted_anomalies.append(anomaly)
+                if prev_frame is None:
+                    prev_frame = frame.copy()
+            except Exception as exc:
+                print(f"Capture error: {exc}")
+                capture_failed.set()
+                break
 
-                    if emitted_anomalies:
-                        print(f"[ANOMALY] Emitted {len(emitted_anomalies)} alert(s): {[a['class'] for a in emitted_anomalies]}")
-                        os.makedirs('static/images/anomalies', exist_ok=True)
+    def detection_worker() -> None:
+        local_prev_frame = None
+        last_detection_ts = 0.0
 
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}.jpg'
+        while not stop_event.is_set() and not capture_failed.is_set():
+            has_pending = detection_event.wait(timeout=0.2)
+            if not has_pending:
+                continue
+            detection_event.clear()
+
+            with detection_request_lock:
+                pending_frame = None if detection_request['frame'] is None else detection_request['frame'].copy()
+                source_seq = int(detection_request.get('seq', 0))
+
+            if pending_frame is None:
+                continue
+
+            now = time.time()
+            if local_prev_frame is not None:
+                try:
+                    motion_detection(local_prev_frame, pending_frame)
+                except Exception:
+                    pass
+            local_prev_frame = pending_frame.copy()
+
+            if (now - last_detection_ts) < DETECTION_MIN_INTERVAL_SEC:
+                tracked_detections = tracker.get_active_tracks(now=now)
+                anomalies = _collect_anomaly_detections(tracked_detections)
+                counts = _count_detection_groups(tracked_detections)
+                with detection_state_lock:
+                    previous_meta = detection_state.get('meta', {})
+                    detection_state['tracked'] = tracked_detections
+                    detection_state['anomalies'] = anomalies
+                    detection_state['meta'] = {
+                        'inference_ms': float(previous_meta.get('inference_ms', 0.0)),
+                        'total_count': len(tracked_detections),
+                        'person_count': counts['person'],
+                        'weapon_count': counts['weapon'],
+                        'object_count': counts['object'],
+                        'source_seq': source_seq,
+                        'updated_at': now,
+                    }
+                continue
+
+            infer_start = time.perf_counter()
+            raw_detections = _run_detection_inference(pending_frame)
+            lane_results = _run_detection_lanes(raw_detections)
+            merged_detections = lane_results['object'] + lane_results['person'] + lane_results['weapon']
+            tracked_detections = tracker.update(merged_detections, now=now)
+            anomalies = _collect_anomaly_detections(tracked_detections)
+            inference_ms = (time.perf_counter() - infer_start) * 1000.0
+            last_detection_ts = now
+
+            emitted_anomalies = []
+            for anomaly in anomalies:
+                if _enqueue_anomaly_event(anomaly['class'], anomaly['confidence']):
+                    emitted_anomalies.append(anomaly)
+
+            if emitted_anomalies and ENABLE_DETECTION_SIDE_EFFECTS:
+                for anomaly in emitted_anomalies:
+                    class_name = anomaly['class']
+                    conf = anomaly['confidence']
+                    try:
+                        log_surveillance_event_db({
+                            'camera_id': 1,
+                            'event_type': 'anomaly_detected',
+                            'severity': 'high',
+                            'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
+                            'image_path': None,
+                            'video_path': None,
+                        })
+                    except Exception as exc:
+                        print(f"Failed to log anomaly: {exc}")
+
+                if SAVE_ANOMALY_FRAMES:
+                    os.makedirs('static/images/anomalies', exist_ok=True)
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}.jpg'
+                    anomaly_frame = pending_frame.copy()
+                    anomaly_frame, _ = detect_anomalies(anomaly_frame, detections=tracked_detections)
+                    anomaly_image_saved = False
+                    try:
+                        anomaly_image_saved = bool(cv2.imwrite(anomaly_image_path, anomaly_frame))
+                    except Exception as exc:
                         anomaly_image_saved = False
+                        print(f"Failed to save anomaly image: {exc}")
 
-                        try:
-                            anomaly_image_saved = bool(cv2.imwrite(anomaly_image_path, output_frame))
-                        except Exception as e:
-                            anomaly_image_saved = False
-                            print(f"Failed to save anomaly image: {e}")
+                    if ENABLE_ANOMALY_ALERTS and anomaly_image_saved:
+                        summary = ", ".join(
+                            f"{a['class']} ({a['confidence']:.2f})" for a in emitted_anomalies
+                        )
+                        subject = "ANOMALY DETECTED"
+                        to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+                        body = (
+                            "ANOMALY ALERT: "
+                            f"{summary} at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                            "Please check the surveillance system immediately."
+                        )
+                        threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path), daemon=True).start()
 
-                        for anomaly in emitted_anomalies:
-                            class_name = anomaly['class']
-                            conf = anomaly['confidence']
-                            try:
-                                log_surveillance_event_db({
-                                    'camera_id': 1,
-                                    'event_type': 'anomaly_detected',
-                                    'severity': 'high',
-                                    'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
-                                    'image_path': anomaly_image_path if anomaly_image_saved else None,
-                                    'video_path': None
-                                })
-                            except Exception as e:
-                                print(f"Failed to log anomaly: {e}")
+            counts = _count_detection_groups(tracked_detections)
+            with detection_state_lock:
+                detection_state['tracked'] = tracked_detections
+                detection_state['anomalies'] = anomalies
+                detection_state['meta'] = {
+                    'inference_ms': inference_ms,
+                    'total_count': len(tracked_detections),
+                    'person_count': counts['person'],
+                    'weapon_count': counts['weapon'],
+                    'object_count': counts['object'],
+                    'source_seq': source_seq,
+                    'updated_at': now,
+                }
 
-                        if ENABLE_ANOMALY_ALERTS and anomaly_image_saved:
-                            summary = ", ".join(
-                                f"{a['class']} ({a['confidence']:.2f})" for a in emitted_anomalies
-                            )
-                            subject = "⚠️ ANOMALY DETECTED!"
-                            to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
-                            body = (
-                                "ANOMALY ALERT: "
-                                f"{summary} at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                                "Please check the surveillance system immediately."
-                            )
-                            threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path)).start()
-            except Exception as e:
-                print(f"Detection error: {e}")
-                output_frame = frame
+    capture_thread = threading.Thread(target=capture_worker, name='capture-worker', daemon=True)
+    detector_thread = threading.Thread(target=detection_worker, name='detection-worker', daemon=True)
+    if upload_video_id:
+        _mark_upload_video_session_started(upload_video_id)
+    capture_thread.start()
+    detector_thread.start()
 
-        # Always encode a frame (prevents broken image tag showing alt text)
-        try:
-            _, jpeg = cv2.imencode(
-                '.jpg',
+    last_sent_seq = -1
+    last_emit_perf = time.perf_counter()
+    fps_history = deque(maxlen=STREAM_METRIC_HISTORY)
+    infer_history = deque(maxlen=STREAM_METRIC_HISTORY)
+    total_history = deque(maxlen=STREAM_METRIC_HISTORY)
+    person_history = deque(maxlen=STREAM_METRIC_HISTORY)
+    weapon_history = deque(maxlen=STREAM_METRIC_HISTORY)
+
+    try:
+        while not stop_event.is_set():
+            has_frame = frame_event.wait(timeout=1.0)
+            if not has_frame:
+                if capture_failed.is_set():
+                    break
+                continue
+            frame_event.clear()
+
+            with frame_lock:
+                frame = None if frame_state['frame'] is None else frame_state['frame'].copy()
+                current_seq = int(frame_state['seq'])
+
+            if frame is None:
+                continue
+
+            if current_seq == last_sent_seq:
+                continue
+            last_sent_seq = current_seq
+
+            with detection_request_lock:
+                detection_request['frame'] = frame
+                detection_request['seq'] = current_seq
+            detection_event.set()
+
+            with detection_state_lock:
+                tracked_detections = list(detection_state.get('tracked', []))
+                detection_meta = dict(detection_state.get('meta', {}))
+
+            output_frame = frame
+            rendered_anomalies = []
+            if tracked_detections:
+                detection_frame = frame.copy()
+                output_frame = detect_objects_and_classify(
+                    detection_frame,
+                    detections=tracked_detections,
+                    apply_side_effects=ENABLE_DETECTION_SIDE_EFFECTS,
+                )
+                output_frame, rendered_anomalies = detect_anomalies(output_frame, detections=tracked_detections)
+
+            now_perf = time.perf_counter()
+            stream_fps = 1.0 / max(1e-6, now_perf - last_emit_perf)
+            last_emit_perf = now_perf
+
+            total_count = int(detection_meta.get('total_count', len(tracked_detections)))
+            person_count = int(detection_meta.get('person_count', 0))
+            weapon_count = int(detection_meta.get('weapon_count', 0))
+            object_count = int(detection_meta.get('object_count', max(0, total_count - person_count - weapon_count)))
+            inference_ms = float(detection_meta.get('inference_ms', 0.0))
+
+            if upload_video_id:
+                _update_upload_video_session(
+                    upload_video_id,
+                    {
+                        'total_count': total_count,
+                        'person_count': person_count,
+                        'weapon_count': weapon_count,
+                        'object_count': object_count,
+                        'anomaly_count': len(rendered_anomalies),
+                        'inference_ms': inference_ms,
+                        'fps': stream_fps,
+                    },
+                    tracked_detections,
+                    rendered_anomalies,
+                )
+
+            fps_history.append(stream_fps)
+            infer_history.append(inference_ms)
+            total_history.append(total_count)
+            person_history.append(person_count)
+            weapon_history.append(weapon_count)
+
+            output_frame = _append_realtime_metrics_panel(
                 output_frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY],
+                {
+                    'fps': stream_fps,
+                    'inference_ms': inference_ms,
+                    'detections_total': total_count,
+                    'person_count': person_count,
+                    'weapon_count': weapon_count,
+                    'object_count': object_count,
+                    'motion_detected': motion_detected,
+                },
+                {
+                    'fps': fps_history,
+                    'inference_ms': infer_history,
+                    'total': total_history,
+                    'person': person_history,
+                    'weapon': weapon_history,
+                },
             )
-            frame_bytes = jpeg.tobytes()
-        except Exception as e:
-            print(f"JPEG encode failed: {e}")
-            frame_bytes = b''
 
-        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            try:
+                _, jpeg = cv2.imencode(
+                    '.jpg',
+                    output_frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY],
+                )
+                frame_bytes = jpeg.tobytes()
+            except Exception as exc:
+                print(f"JPEG encode failed: {exc}")
+                frame_bytes = b''
 
-        # Update previous frame every loop for motion comparison
-        prev_frame = frame.copy()
+            yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-    cap.release()
+            prev_frame = frame.copy()
+    finally:
+        stop_event.set()
+        detection_event.set()
+        frame_event.set()
+        if capture_thread.is_alive():
+            capture_thread.join(timeout=1.2)
+        if detector_thread.is_alive():
+            detector_thread.join(timeout=1.2)
+        cap.release()
+
+        if upload_video_id:
+            with upload_video_sessions_lock:
+                session_data = upload_video_sessions.get(upload_video_id, {})
+                processed_frames = int(session_data.get('frames_processed', 0))
+                already_failed = str(session_data.get('status', '')) == 'failed'
+
+            if processed_frames <= 0:
+                _finalize_upload_video_session(
+                    upload_video_id,
+                    status='failed',
+                    error_message='No frames were processed from the uploaded video.',
+                )
+            elif not already_failed:
+                _finalize_upload_video_session(upload_video_id, status='completed')
 
 # Route for home page
 @app.route('/')
@@ -944,8 +1509,25 @@ def index():
 def upload():
     if 'loggedin' not in session:
         return redirect(url_for('index'))
-    video_path = request.args.get('video_path')
-    return render_template('upload_video.html', video_path=video_path)
+    video_id = (request.args.get('video_id') or '').strip()
+    message = request.args.get('message', '')
+    video_session = None
+
+    if video_id:
+        with upload_video_sessions_lock:
+            existing = upload_video_sessions.get(video_id)
+            if existing:
+                video_session = deepcopy(existing)
+            else:
+                message = 'Video session not found. Please upload the file again.'
+                video_id = ''
+
+    return render_template(
+        'upload_video.html',
+        video_id=video_id,
+        video=video_session,
+        message=message,
+    )
 
 @app.route('/upload_video', methods=['GET', 'POST'])
 def upload_video():
@@ -953,28 +1535,113 @@ def upload_video():
         return redirect(url_for('index'))
     if request.method == 'POST':
         if 'video' not in request.files:
-            return 'No video file uploaded'
+            return redirect(url_for('upload', message='No video file uploaded.'))
+
         video = request.files['video']
         if video.filename == '':
-            return 'No video file selected'
-        if video and allowed_file(video.filename):
-            filename = video.filename
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            video.save(file_path)
-            return redirect(url_for('upload', video_path=file_path))
-        return 'Invalid File Type'
-    return render_template('upload_video.html')
+            return redirect(url_for('upload', message='No video file selected.'))
 
-#seperate route for uploaded video processing 
+        if not (video and allowed_file(video.filename)):
+            return redirect(url_for('upload', message='Invalid file type. Please upload MP4, AVI, MOV, or MKV.'))
+
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        safe_name = secure_filename(video.filename) or f'uploaded_{int(time.time())}.mp4'
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        stored_name = f"{timestamp}_{uuid.uuid4().hex[:8]}_{safe_name}"
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_name)
+
+        try:
+            video.save(file_path)
+        except Exception as exc:
+            print(f"[UPLOAD] Failed to save uploaded video: {exc}")
+            return redirect(url_for('upload', message='Failed to save video file. Please try again.'))
+
+        video_id = uuid.uuid4().hex
+        _register_upload_video_session(
+            video_id=video_id,
+            original_name=safe_name,
+            stored_name=stored_name,
+            absolute_path=file_path,
+        )
+        return redirect(url_for('upload', video_id=video_id))
+
+    return redirect(url_for('upload'))
+
+# Separate route for uploaded video processing
 @app.route('/upload_video_feed')
 def upload_video_feed():
     if 'loggedin' not in session:
         return redirect(url_for('index'))
-    video_path = request.args.get('video_path')
-    if video_path:
-        stop_event = threading.Event()
-        return Response(video_stream(video_path, stop_event), mimetype='multipart/x-mixed-replace; boundary=frame')
-    return 'No video path provided'
+
+    video_id = (request.args.get('video_id') or '').strip()
+    if not video_id:
+        return 'No video ID provided', 400
+
+    with upload_video_sessions_lock:
+        video_session = upload_video_sessions.get(video_id)
+        if not video_session:
+            return 'Video session not found', 404
+        video_path = video_session.get('absolute_video_path', '')
+
+    if not video_path or not os.path.exists(video_path):
+        _finalize_upload_video_session(video_id, status='failed', error_message='Uploaded video file is missing.')
+        return 'Uploaded video file not found', 404
+
+    stop_event = threading.Event()
+    return Response(
+        video_stream(video_path, stop_event, upload_video_id=video_id),
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+    )
+
+
+@app.route('/upload_video_summary')
+def upload_video_summary():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    video_id = (request.args.get('video_id') or '').strip()
+    if not video_id:
+        return jsonify({'error': 'Missing video_id'}), 400
+
+    with upload_video_sessions_lock:
+        session_data = deepcopy(upload_video_sessions.get(video_id))
+
+    if not session_data:
+        return jsonify({'error': 'Video session not found'}), 404
+
+    frames_processed = int(session_data.get('frames_processed', 0))
+    total_detections = int(session_data.get('total_detections', 0))
+    total_anomalies = int(session_data.get('total_anomalies', 0))
+    started_at = float(session_data.get('started_at') or session_data.get('created_at') or time.time())
+    ended_at = float(session_data.get('completed_at') or time.time())
+    duration_sec = max(0.0, ended_at - started_at)
+
+    avg_detections = (total_detections / frames_processed) if frames_processed else 0.0
+    avg_inference_ms = (float(session_data.get('sum_inference_ms', 0.0)) / frames_processed) if frames_processed else 0.0
+    avg_fps = (float(session_data.get('sum_fps', 0.0)) / frames_processed) if frames_processed else 0.0
+
+    payload = {
+        'success': True,
+        'video_id': video_id,
+        'status': str(session_data.get('status', 'ready')),
+        'video_name': str(session_data.get('video_name', 'uploaded_video')),
+        'error': str(session_data.get('error', '')),
+        'summary': {
+            'frames_processed': frames_processed,
+            'total_detections': total_detections,
+            'total_anomalies': total_anomalies,
+            'peak_detections': int(session_data.get('peak_detections', 0)),
+            'peak_anomalies': int(session_data.get('peak_anomalies', 0)),
+            'avg_detections_per_frame': round(avg_detections, 3),
+            'avg_inference_ms': round(avg_inference_ms, 2),
+            'avg_fps': round(avg_fps, 2),
+            'duration_sec': round(duration_sec, 2),
+            'max_confidence': round(float(session_data.get('max_confidence', 0.0)), 4),
+        },
+        'context': _build_upload_video_context(session_data),
+        'graph': session_data.get('graph', {}),
+    }
+    return jsonify(payload)
 
 # SQLite database configuration
 DATABASE = 'night_surveillance.db'
@@ -1276,74 +1943,104 @@ def logout():
 def lowlight_detection():
     if 'loggedin' not in session:
         return redirect(url_for('index'))
+
     if request.method == 'POST':
         if 'image' not in request.files:
             return jsonify({'error': 'No image file provided'}), 400
-        
+
         file = request.files['image']
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
-        
+
         if file and allowed_image(file.filename):
-            # Create upload directory
             os.makedirs(app.config['LOWLIGHT_FOLDER'], exist_ok=True)
-            
-            # Save uploaded file
+
+            safe_name = secure_filename(file.filename) or f'lowlight_{int(time.time())}.jpg'
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"lowlight_{timestamp}_{file.filename}"
+            filename = f"lowlight_{timestamp}_{safe_name}"
             filepath = os.path.join(app.config['LOWLIGHT_FOLDER'], filename)
             file.save(filepath)
-            
-            # Read and enhance the image
+
             img = cv2.imread(filepath)
             if img is None:
                 return jsonify({'error': 'Failed to read image'}), 500
-            
-            # Enhance low-light image
+
+            img_h, img_w = img.shape[:2]
+            scale_ratio = min(1.0, LOWLIGHT_MAX_SIDE / float(max(img_h, img_w)))
+            if scale_ratio < 1.0:
+                resized_w = max(64, int(img_w * scale_ratio))
+                resized_h = max(64, int(img_h * scale_ratio))
+                img_for_processing = cv2.resize(img, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+            else:
+                img_for_processing = img.copy()
+
+            enhancement_settings = {
+                'brightness': 58,
+                'contrast': 62,
+                'sharpness': 52,
+                'denoise': 52,
+                'upscale': 45,
+                'upscale_scale': '2',
+            }
+
             try:
-                enhanced_img = enhance_image(img)
+                enhanced_img = enhance_image(img_for_processing, settings=enhancement_settings)
             except Exception as e:
                 print(f"Enhancement failed: {e}")
-                enhanced_img = img
-            
-            # Detect objects in enhanced image
-            m = get_model()
-            if m is None:
+                # Fast fallback pipeline when the enhancement model stack is unavailable.
+                ycrcb = cv2.cvtColor(img_for_processing, cv2.COLOR_BGR2YCrCb)
+                y, cr, cb = cv2.split(ycrcb)
+                y = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(y)
+                enhanced_img = cv2.cvtColor(cv2.merge((y, cr, cb)), cv2.COLOR_YCrCb2BGR)
+
+            if get_model() is None:
                 return jsonify({'error': 'Model not loaded'}), 500
-            
-            results = m(enhanced_img)
-            detections = []
-            
-            # Draw detections on image
-            for detection in results[0].boxes:
-                x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
-                class_name = m.names[int(cls)]
-                
-                detections.append({
-                    'class': class_name,
-                    'confidence': float(conf),
-                    'bbox': [int(x1), int(y1), int(x2), int(y2)]
-                })
-                
-                # Draw bounding box
-                cv2.rectangle(enhanced_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"{class_name} {conf:.2f}"
-                cv2.putText(enhanced_img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
-            # Save result image
+
+            detections = _run_detection_inference(enhanced_img)
+            annotated = detect_objects_and_classify(
+                enhanced_img.copy(),
+                detections=detections,
+                apply_side_effects=False,
+            )
+            annotated, anomalies = detect_anomalies(annotated, detections=detections)
+
             result_filename = f"result_{timestamp}.jpg"
             result_path = os.path.join(app.config['LOWLIGHT_FOLDER'], result_filename)
-            cv2.imwrite(result_path, enhanced_img)
-            
+            cv2.imwrite(result_path, annotated)
+
+            anomaly_counts = {}
+            for anomaly in anomalies:
+                anomaly_key = _normalize_label(anomaly.get('class', '')) or 'unknown'
+                anomaly_counts[anomaly_key] = int(anomaly_counts.get(anomaly_key, 0)) + 1
+
+            counts = _count_detection_groups(detections)
+            top_anomaly = ''
+            if anomaly_counts:
+                top_anomaly = max(anomaly_counts.items(), key=lambda item: item[1])[0]
+
             return jsonify({
                 'success': True,
                 'detections': detections,
+                'anomalies': anomalies,
+                'counts': {
+                    'total': len(detections),
+                    'person': int(counts.get('person', 0)),
+                    'weapon': int(counts.get('weapon', 0)),
+                    'object': int(counts.get('object', 0)),
+                    'anomaly': len(anomalies),
+                },
+                'anomaly_counts': anomaly_counts,
+                'context': {
+                    'enhancement': 'low_light_enhancement_plus_detection',
+                    'anomaly_detected': bool(anomalies),
+                    'top_anomaly': top_anomaly,
+                },
                 'result_image': f"/static/lowlight_uploads/{result_filename}",
-                'original_image': f"/static/lowlight_uploads/{filename}"
+                'original_image': f"/static/lowlight_uploads/{filename}",
             })
         else:
             return jsonify({'error': 'Invalid file type. Please upload JPG, PNG, or BMP'}), 400
-    
+
     # GET request - render the upload page
     return render_template('lowlight_detection.html')
 

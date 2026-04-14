@@ -138,11 +138,12 @@
             <label class="select-row" for="upscaleScaleSelect">
               <span>Super-Resolution Scale</span>
               <select id="upscaleScaleSelect">
-                <option value="2">2x (EDSR)</option>
-                <option value="4" selected>4x (EDSR)</option>
-                <option value="16">16x (EDSR x4 + x4)</option>
+                <option value="2">2x (Deep SR Auto)</option>
+                <option value="4" selected>4x (Deep SR Auto)</option>
+                <option value="8">8x (Deep SR Auto Multi-Pass)</option>
+                <option value="16">16x (Deep SR Auto Multi-Pass)</option>
               </select>
-              <small>Deep model-based upscaling. Not interpolation-only resizing.</small>
+              <small>Uses Real-ESRGAN on GPU and fast FSRCNN on CPU. No interpolation-only upscale.</small>
             </label>
           </div>
 

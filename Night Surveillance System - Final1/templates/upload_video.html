@@ -4,157 +4,573 @@
   <meta charset="UTF-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Night Shield | Dashboard</title>
+  <title>Night Shield | Upload Video</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Sharp:opsz,wght,FILL,GRAD@48,400,0,0" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css')}}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/upload-style.css')}}">
+  <style>
+    .upload-card,
+    .stream-card,
+    .summary-card,
+    .graph-card,
+    .context-card {
+      background: var(--color-white);
+      border-radius: var(--card-border-radius);
+      box-shadow: var(--box-shadow);
+      padding: 1.1rem;
+      margin-top: 1.05rem;
+    }
+
+    .upload-form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .upload-form input[type="file"] {
+      flex: 1 1 260px;
+      min-width: 220px;
+      border: 1px dashed var(--color-primary);
+      border-radius: 10px;
+      padding: 0.8rem;
+      background: var(--color-light);
+    }
+
+    .btn-primary {
+      border: 0;
+      border-radius: 9px;
+      padding: 0.78rem 1rem;
+      color: #fff;
+      cursor: pointer;
+      background: linear-gradient(100deg, #0ea5e9, #2563eb);
+      font-weight: 600;
+    }
+
+    .notice {
+      margin-top: 0.9rem;
+      padding: 0.75rem 0.9rem;
+      border-radius: 10px;
+      background: rgba(14, 165, 233, 0.1);
+      color: #0b4f74;
+      border: 1px solid rgba(14, 165, 233, 0.2);
+    }
+
+    .analysis-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: 1.65fr 1fr;
+      margin-top: 1rem;
+    }
+
+    .stream-card img {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--color-light);
+      background: #030712;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.8rem;
+      margin-bottom: 0.9rem;
+    }
+
+    .status-pill {
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.3rem 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .status-ready { background: rgba(99, 102, 241, 0.17); color: #3f47bd; }
+    .status-processing { background: rgba(6, 182, 212, 0.17); color: #0a7488; }
+    .status-completed { background: rgba(34, 197, 94, 0.18); color: #0d7a37; }
+    .status-failed { background: rgba(239, 68, 68, 0.18); color: #9f1d1d; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(120px, 1fr));
+      gap: 0.65rem;
+    }
+
+    .metric-item {
+      border: 1px solid var(--color-light);
+      border-radius: 9px;
+      padding: 0.65rem;
+      background: rgba(241, 245, 249, 0.6);
+    }
+
+    .metric-item .label {
+      font-size: 0.72rem;
+      opacity: 0.78;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.28rem;
+    }
+
+    .metric-item .value {
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+
+    #summary-chart {
+      width: 100%;
+      height: 360px;
+      display: block;
+      border-radius: 10px;
+      border: 1px solid var(--color-light);
+      background: #fff;
+    }
+
+    .context-columns {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(160px, 1fr));
+      gap: 1rem;
+      margin-top: 0.8rem;
+    }
+
+    .count-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 0.45rem;
+    }
+
+    .count-list li {
+      border: 1px solid var(--color-light);
+      border-radius: 8px;
+      padding: 0.45rem 0.55rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 1024px) {
+      .analysis-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .context-columns {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
 </head>
 <body>
-   <div class="container">
-      <aside>
-           
-         <div class="top">
-           <div class="logo">
-             <h2>NIGHT <span class="danger">SHIELD</span> </h2>
-           </div>
-           <div class="close" id="close_btn">
-            <span class="material-symbols-sharp">close</span>
-           </div>
-         </div>
-         <!-- end top -->
-          <div class="sidebar">
-
-            <a href="/dashboard">
-              <span class="material-symbols-sharp">grid_view </span>
-              <h3>Dashboard</h3>
-           </a>
-           <a href="/addCamera">
-            <span class="material-symbols-sharp">videocam </span>
-            <h3>Video Cam</h3>
-         </a>
-         <a href="/upload">
-          <span class="material-symbols-sharp">upload </span>
+  <div class="container">
+    <aside>
+      <div class="top">
+        <div class="logo">
+          <h2>NIGHT <span class="danger">SHIELD</span></h2>
+        </div>
+        <div class="close" id="close_btn">
+          <span class="material-symbols-sharp">close</span>
+        </div>
+      </div>
+      <div class="sidebar">
+        <a href="/dashboard">
+          <span class="material-symbols-sharp">grid_view</span>
+          <h3>Dashboard</h3>
+        </a>
+        <a href="/addCamera">
+          <span class="material-symbols-sharp">videocam</span>
+          <h3>Video Cam</h3>
+        </a>
+        <a href="/upload" class="active">
+          <span class="material-symbols-sharp">upload</span>
           <h3>Upload Video</h3>
-          </a>
-           <a href="/contact">
-            <span class="material-symbols-sharp">help </span>
-            <h3>Help</h3>
-         </a>
-           <a href="/logout">
-              <span class="material-symbols-sharp">logout </span>
-              <h3>Logout</h3>
-           </a>
-             
+        </a>
+        <a href="/lowlight_detection">
+          <span class="material-symbols-sharp">nightlight</span>
+          <h3>Low-Light Detection</h3>
+        </a>
+        <a href="/image_enhancement">
+          <span class="material-symbols-sharp">auto_fix_high</span>
+          <h3>Image Enhancement</h3>
+        </a>
+        <a href="/datasets">
+          <span class="material-symbols-sharp">dataset</span>
+          <h3>Datasets</h3>
+        </a>
+        <a href="/surveillance_events">
+          <span class="material-symbols-sharp">security</span>
+          <h3>Events</h3>
+        </a>
+        <a href="/dataset_analytics">
+          <span class="material-symbols-sharp">analytics</span>
+          <h3>Analytics</h3>
+        </a>
+        <a href="/contact">
+          <span class="material-symbols-sharp">help</span>
+          <h3>Help</h3>
+        </a>
+        <a href="/logout">
+          <span class="material-symbols-sharp">logout</span>
+          <h3>Logout</h3>
+        </a>
+      </div>
+    </aside>
 
+    <main>
+      <h1>Upload Video</h1>
+      <p style="opacity: 0.82;">Upload a video and run anomaly detection with live graph and context summary.</p>
 
+      {% if message %}
+      <div class="notice">{{ message }}</div>
+      {% endif %}
+
+      <section class="upload-card">
+        <form class="upload-form" action="{{ url_for('upload_video') }}" method="post" enctype="multipart/form-data">
+          <input type="file" name="video" accept=".mp4,.avi,.mov,.mkv" required>
+          <button class="btn-primary" type="submit">Upload And Analyze</button>
+        </form>
+      </section>
+
+      {% if video_id %}
+      <section class="analysis-grid">
+        <div class="stream-card">
+          <h3 style="margin-bottom: 0.7rem;">Detection Stream</h3>
+          <img id="video-stream" src="{{ url_for('upload_video_feed', video_id=video_id) }}" alt="Uploaded video stream">
+        </div>
+
+        <div class="summary-card">
+          <div class="status-row">
+            <span id="status-pill" class="status-pill status-ready">Ready</span>
+            <span id="video-name" style="font-size: 0.85rem; opacity: 0.85;">{{ (video.video_name if video else 'uploaded_video') }}</span>
           </div>
 
-      </aside>
-      <!-- --------------
-        end asid
-      -------------------- -->
-
-      <!-- --------------
-        start main part
-      --------------- -->
-
-      <main>
-           <h1>Upload Video</h1>
-
-           <div class="date">
-             <input type="date" >
-           </div>
-
-        
-        <div id="video-container ">
-            <form action="{{ url_for('upload_video') }}" method="post" enctype="multipart/form-data">
-                <input type="file" name="video" accept=".mp4, .avi, .mov, .mkv">
-                <input type="submit" value="Upload">
-            </form>
-            {% if video_path %}
-            <h2>Processing Video</h2>
-            <img src="{{ url_for('upload_video_feed', video_path=video_path) }}" width="640" height="480">
-            {% endif %}
-        </div>
-
-      
-
-      </main>
-      <!------------------
-         end main
-        ------------------->
-
-      <!----------------
-        start right main 
-      ---------------------->
-    <div class="right">
-
-<div class="top">
-   <button id="menu_bar">
-     <span class="material-symbols-sharp">menu</span>
-   </button>
-
-   <div class="theme-toggler">
-     <span class="material-symbols-sharp active">light_mode</span>
-     <span class="material-symbols-sharp">dark_mode</span>
-   </div>
-    <div class="profile">
-       <div class="info">
-           <p><b>Profile</b></p>
-           <p>Admin</p>
-           <small class="text-muted"></small>
-       </div>
-       <div class="profile-photo">
-         <img src="{{ url_for('static', filename='images/Profile-pic.jpeg')}}" alt=""/>
-       </div>
-    </div>
-</div>
-
-
-        <div class="insights">
-
-           <!-- start seling -->
-            <div class="sales">
-               <span class="material-symbols-sharp">camera</span>
-               <div class="middle">
-
-                 <div class="left">
-                   <h3>Live Monitoring</h3>
-                   <h1>Active:1</h1>
-                 </div>
-                  <div class="progress">
-                      <svg>
-                         <circle  r="30" cy="40" cx="40"></circle>
-                      </svg>
-                      <div class="number"><p>80%</p></div> 
-                      <!-- represent the coverage percentage of surveillance area -->
-                  </div>
-
-               </div>
-               <small>Last 24 Hours</small>
+          <div class="metric-grid">
+            <div class="metric-item">
+              <div class="label">Frames</div>
+              <div class="value" id="metric-frames">0</div>
             </div>
-            
-           <!-- end seling -->
-
+            <div class="metric-item">
+              <div class="label">Detections</div>
+              <div class="value" id="metric-detections">0</div>
+            </div>
+            <div class="metric-item">
+              <div class="label">Anomalies</div>
+              <div class="value" id="metric-anomalies">0</div>
+            </div>
+            <div class="metric-item">
+              <div class="label">Duration (s)</div>
+              <div class="value" id="metric-duration">0</div>
+            </div>
+            <div class="metric-item">
+              <div class="label">Avg Inference</div>
+              <div class="value" id="metric-inference">0 ms</div>
+            </div>
+            <div class="metric-item">
+              <div class="label">Avg FPS</div>
+              <div class="value" id="metric-fps">0</div>
+            </div>
+            <div class="metric-item">
+              <div class="label">Peak Detections</div>
+              <div class="value" id="metric-peak">0</div>
+            </div>
+            <div class="metric-item">
+              <div class="label">Risk</div>
+              <div class="value" id="metric-risk">low</div>
+            </div>
+          </div>
         </div>
-         
-     
-     </div>
+      </section>
 
-</div>
+      <section class="graph-card">
+        <h3 style="margin-bottom: 0.7rem;">Realtime Detection Graph</h3>
+        <canvas id="summary-chart" width="1000" height="360"></canvas>
+      </section>
 
+      <section class="context-card">
+        <h3 style="margin-bottom: 0.55rem;">Context Summary</h3>
+        <p id="context-narrative" style="opacity: 0.85;">Waiting for processing updates...</p>
 
-   </div>
+        <div class="context-columns">
+          <div>
+            <h4 style="margin-bottom: 0.45rem;">Top Detected Classes</h4>
+            <ul id="top-classes-list" class="count-list"></ul>
+          </div>
+          <div>
+            <h4 style="margin-bottom: 0.45rem;">Top Anomaly Classes</h4>
+            <ul id="top-anomaly-list" class="count-list"></ul>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+    </main>
 
-     <!-- Footer -->
-   <footer>
-    <p>&copy; <span id="year"></span> Night Shield. All rights reserved.</p>
-    <script>
-        document.getElementById('year').textContent = new Date().getFullYear();
-    </script>
-</footer>
+    <div class="right">
+      <div class="top">
+        <button id="menu_bar">
+          <span class="material-symbols-sharp">menu</span>
+        </button>
+        <div class="theme-toggler">
+          <span class="material-symbols-sharp active">light_mode</span>
+          <span class="material-symbols-sharp">dark_mode</span>
+        </div>
+        <div class="profile">
+          <div class="info">
+            <p><b>{{ session.get('firstname', 'User') }}</b></p>
+            <p>Admin</p>
+            <small class="text-muted"></small>
+          </div>
+          <div class="profile-photo">
+            <img src="{{ url_for('static', filename='images/profile-1.jpg') }}" alt="Profile Picture">
+          </div>
+        </div>
+      </div>
 
-   <script src="{{ url_for('static', filename='js/dashboard-script.js')}}"></script>
+      <div class="recent_updates">
+        <h2>Upload Analysis Notes</h2>
+        <div class="updates">
+          <div class="update">
+            <div class="profile-photo">
+              <span class="material-symbols-sharp">movie</span>
+            </div>
+            <div class="message">
+              <p><b>Video Timeline</b></p>
+              <small>Graph is updated from frame-by-frame detections and anomaly events.</small>
+            </div>
+          </div>
+          <div class="update">
+            <div class="profile-photo">
+              <span class="material-symbols-sharp">warning</span>
+            </div>
+            <div class="message">
+              <p><b>Anomaly Context</b></p>
+              <small>Risk level is estimated from anomaly density in the processed upload.</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/dashboard-script.js')}}"></script>
+  <script>
+    const videoId = {{ (video_id or '') | tojson }};
+    const summaryUrl = videoId ? `/upload_video_summary?video_id=${encodeURIComponent(videoId)}` : '';
+    const summaryCanvas = document.getElementById('summary-chart');
+
+    let pollTimer = null;
+
+    function statusClass(status) {
+      if (status === 'processing') return 'status-pill status-processing';
+      if (status === 'completed') return 'status-pill status-completed';
+      if (status === 'failed') return 'status-pill status-failed';
+      return 'status-pill status-ready';
+    }
+
+    function setStatus(status, errorText) {
+      const pill = document.getElementById('status-pill');
+      if (!pill) return;
+      pill.className = statusClass(status);
+      pill.textContent = status || 'ready';
+
+      const narrative = document.getElementById('context-narrative');
+      if (status === 'failed' && narrative) {
+        narrative.textContent = errorText || 'Video processing failed.';
+      }
+    }
+
+    function formatNumber(value, fallback = '0') {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return fallback;
+      return String(value);
+    }
+
+    function setMetric(id, value) {
+      const node = document.getElementById(id);
+      if (node) node.textContent = value;
+    }
+
+    function renderCountList(targetId, items, emptyText) {
+      const listNode = document.getElementById(targetId);
+      if (!listNode) return;
+
+      if (!Array.isArray(items) || items.length === 0) {
+        listNode.innerHTML = `<li><span>${emptyText}</span><span>0</span></li>`;
+        return;
+      }
+
+      listNode.innerHTML = items.map(item => {
+        const label = String(item.label || 'unknown');
+        const count = Number(item.count || 0);
+        return `<li><span>${label}</span><span>${count}</span></li>`;
+      }).join('');
+    }
+
+    function drawSummaryChart(graph) {
+      if (!summaryCanvas) return;
+      const ctx = summaryCanvas.getContext('2d');
+      if (!ctx) return;
+
+      const rect = summaryCanvas.getBoundingClientRect();
+      if (rect.width > 0 && summaryCanvas.width !== Math.floor(rect.width)) {
+        summaryCanvas.width = Math.floor(rect.width);
+      }
+
+      const width = summaryCanvas.width;
+      const height = summaryCanvas.height;
+      const padLeft = 48;
+      const padRight = 16;
+      const padTop = 18;
+      const padBottom = 34;
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(0, 0, width, height);
+
+      const detections = Array.isArray(graph?.detections) ? graph.detections : [];
+      const anomalies = Array.isArray(graph?.anomalies) ? graph.anomalies : [];
+      const persons = Array.isArray(graph?.persons) ? graph.persons : [];
+      const weapons = Array.isArray(graph?.weapons) ? graph.weapons : [];
+
+      const points = Math.max(detections.length, anomalies.length, persons.length, weapons.length);
+      if (points < 2) {
+        ctx.fillStyle = '#64748b';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('Waiting for enough points to render graph...', 20, 32);
+        return;
+      }
+
+      const allValues = detections.concat(anomalies, persons, weapons).map(v => Number(v || 0));
+      const maxY = Math.max(1, ...allValues);
+
+      const plotW = width - padLeft - padRight;
+      const plotH = height - padTop - padBottom;
+
+      ctx.strokeStyle = '#d1d5db';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padLeft, padTop);
+      ctx.lineTo(padLeft, padTop + plotH);
+      ctx.lineTo(padLeft + plotW, padTop + plotH);
+      ctx.stroke();
+
+      ctx.fillStyle = '#6b7280';
+      ctx.font = '12px sans-serif';
+      for (let i = 0; i <= 4; i += 1) {
+        const yVal = Math.round((maxY * i) / 4);
+        const y = padTop + plotH - (plotH * (i / 4));
+        ctx.fillText(String(yVal), 6, y + 4);
+
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+        ctx.beginPath();
+        ctx.moveTo(padLeft, y);
+        ctx.lineTo(padLeft + plotW, y);
+        ctx.stroke();
+      }
+
+      function plot(series, color, widthPx) {
+        if (!Array.isArray(series) || series.length < 2) return;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = widthPx;
+        ctx.beginPath();
+        series.forEach((rawVal, idx) => {
+          const x = padLeft + ((idx / (series.length - 1)) * plotW);
+          const v = Number(rawVal || 0);
+          const y = padTop + plotH - ((v / maxY) * plotH);
+          if (idx === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+
+      plot(detections, '#0ea5e9', 2.4);
+      plot(anomalies, '#ef4444', 2.4);
+      plot(persons, '#22c55e', 1.8);
+      plot(weapons, '#f59e0b', 1.8);
+
+      const legend = [
+        ['Detections', '#0ea5e9'],
+        ['Anomalies', '#ef4444'],
+        ['Persons', '#22c55e'],
+        ['Weapons', '#f59e0b'],
+      ];
+      let legendX = padLeft;
+      const legendY = height - 10;
+      ctx.font = '12px sans-serif';
+      legend.forEach(([name, color]) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(legendX, legendY - 8, 12, 3);
+        ctx.fillStyle = '#334155';
+        ctx.fillText(name, legendX + 16, legendY);
+        legendX += Math.max(80, ctx.measureText(name).width + 34);
+      });
+    }
+
+    async function fetchSummary() {
+      if (!summaryUrl) return;
+
+      try {
+        const response = await fetch(summaryUrl, { cache: 'no-store' });
+        const data = await response.json();
+
+        if (!response.ok || !data?.success) {
+          setStatus('failed', data?.error || 'Could not load summary.');
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          return;
+        }
+
+        setStatus(data.status, data.error || '');
+        setMetric('metric-frames', formatNumber(data.summary?.frames_processed));
+        setMetric('metric-detections', formatNumber(data.summary?.total_detections));
+        setMetric('metric-anomalies', formatNumber(data.summary?.total_anomalies));
+        setMetric('metric-duration', formatNumber(data.summary?.duration_sec));
+        setMetric('metric-inference', `${formatNumber(data.summary?.avg_inference_ms)} ms`);
+        setMetric('metric-fps', formatNumber(data.summary?.avg_fps));
+        setMetric('metric-peak', formatNumber(data.summary?.peak_detections));
+        setMetric('metric-risk', String(data.context?.risk_level || 'low'));
+
+        const narrativeNode = document.getElementById('context-narrative');
+        if (narrativeNode) {
+          const narrative = data.context?.narrative || 'Processing context not available yet.';
+          const anomalyRate = Number(data.context?.anomaly_rate_percent || 0).toFixed(2);
+          narrativeNode.textContent = `${narrative} Anomaly rate: ${anomalyRate}%`;
+        }
+
+        renderCountList('top-classes-list', data.context?.top_detected_classes, 'No detections yet');
+        renderCountList('top-anomaly-list', data.context?.top_anomaly_classes, 'No anomalies yet');
+        drawSummaryChart(data.graph || {});
+
+        const videoName = document.getElementById('video-name');
+        if (videoName && data.video_name) {
+          videoName.textContent = data.video_name;
+        }
+
+        if (data.status === 'completed' || data.status === 'failed') {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        }
+      } catch (error) {
+        setStatus('failed', `Summary polling error: ${error.message}`);
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+    }
+
+    if (videoId) {
+      fetchSummary();
+      pollTimer = setInterval(fetchSummary, 1200);
+      window.addEventListener('resize', () => fetchSummary());
+    }
+  </script>
 </body>
 </html>
-
