@@ -2,33 +2,51 @@ const sideMenu = document.querySelector('aside');
 const menuBtn = document.querySelector('#menu_bar');
 const closeBtn = document.querySelector('#close_btn');
 
-menuBtn.addEventListener('click', () => {
-    sideMenu.style.display = 'block';
-});
+if (menuBtn && sideMenu) {
+    menuBtn.addEventListener('click', () => {
+        sideMenu.style.display = 'block';
+    });
+}
 
-closeBtn.addEventListener('click', () => {
-    sideMenu.style.display = 'none';
-});
+if (closeBtn && sideMenu) {
+    closeBtn.addEventListener('click', () => {
+        sideMenu.style.display = 'none';
+    });
+}
 
 const themeToggler = document.querySelector('.theme-toggler');
+const lightIcon = themeToggler?.querySelector('span:nth-child(1)');
+const darkIcon = themeToggler?.querySelector('span:nth-child(2)');
+
+function applyTheme(theme) {
+    const isDark = theme === 'dark';
+    document.body.classList.toggle('dark-theme-variables', isDark);
+
+    if (lightIcon && darkIcon) {
+        lightIcon.classList.toggle('active', !isDark);
+        darkIcon.classList.toggle('active', isDark);
+    }
+
+    try {
+        localStorage.setItem('theme-pref', isDark ? 'dark' : 'light');
+    } catch (e) {}
+}
 
 // Persist theme preference
 try {
     const storedTheme = localStorage.getItem('theme-pref');
-    if (storedTheme === 'dark') {
-        document.body.classList.add('dark-theme-variables');
-        themeToggler?.querySelector('span:nth-child(2)')?.classList.add('active');
+    if (storedTheme === 'dark' || storedTheme === 'light') {
+        applyTheme(storedTheme);
     } else {
-        themeToggler?.querySelector('span:nth-child(1)')?.classList.add('active');
+        applyTheme(document.body.classList.contains('dark-theme-variables') ? 'dark' : 'light');
     }
 } catch (e) {}
 
-themeToggler.addEventListener('click', () => {
-    const isDark = document.body.classList.toggle('dark-theme-variables');
-    themeToggler.querySelector('span:nth-child(1)').classList.toggle('active', !isDark);
-    themeToggler.querySelector('span:nth-child(2)').classList.toggle('active', isDark);
-    try { localStorage.setItem('theme-pref', isDark ? 'dark' : 'light'); } catch (e) {}
-});
+if (themeToggler) {
+    themeToggler.addEventListener('click', () => {
+        applyTheme(document.body.classList.contains('dark-theme-variables') ? 'light' : 'dark');
+    });
+}
 
 // Camera feature
 const cameraIcons = document.querySelectorAll('.icon');
@@ -38,6 +56,10 @@ let currentFormIndex = -1;
 
 cameraIcons.forEach((icon, index) => {
     icon.addEventListener('click', () => {
+        if (!cameraForms[index]) {
+            return;
+        }
+
         if (currentFormIndex === index) {
             // Close the selected camera form
             cameraForms[index].style.display = 'none';

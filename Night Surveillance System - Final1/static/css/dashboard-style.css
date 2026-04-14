@@ -1,19 +1,19 @@
 @import url('design-tokens.css');
 
 :root {
-  --clr-primary: var(--accent-blue);
-  --clr-danger: var(--danger);
-  --clr-success: var(--success);
-  --clr-white: var(--bg-card);
-  --clr-info-dark: var(--text-muted);
-  --clr-info-light: rgba(255, 255, 255, 0.18);
-  --clr-dark: var(--text-primary);
+  --clr-primary: #0066FF;
+  --clr-danger: #FF4444;
+  --clr-success: #00FF88;
+  --clr-white: #ffffff;
+  --clr-info-dark: #4b5563;
+  --clr-info-light: rgba(0, 0, 0, 0.1);
+  --clr-dark: #1f2937;
   --clr-warnig: #ffd166;
   --clr-warning: #ffd166;
-  --clr-light: rgba(255, 255, 255, 0.1);
-  --clr-primary-variant: #0066FF;
-  --clr-dark-variant: #93a0b4;
-  --clr-color-background: var(--bg-primary);
+  --clr-light: rgba(0, 0, 0, 0.05);
+  --clr-primary-variant: #0052cc;
+  --clr-dark-variant: #4b5563;
+  --clr-color-background: #f3f4f6;
 
   --card-border-radius: var(--radius);
   --border-radius-1: 8px;
@@ -22,7 +22,7 @@
 
   --card-padding: 1.2rem;
   --padding-1: 1rem;
-  --box-shadow: var(--shadow);
+  --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 /* dark theme */
@@ -49,15 +49,7 @@
   appearance: none;
 }
 
-/* Night Mode Background with gentle gradient overlay */
-.dark-theme-variables .container {
-  background-image: linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.65)), url('../images/1.jpg');
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-attachment: fixed;
-}
-
+/* Base Background with light gradient overlay */
 body{
    width: 100vw;
    height: 100vh;
@@ -65,18 +57,26 @@ body{
    user-select: none;
    overflow-x: hidden;
    background: var(--clr-color-background);
-  font-family: var(--font);
+   font-family: var(--font);
 }
 
-.container  {
+.container {
+  background-image: linear-gradient(rgba(240, 242, 245, 0.85), rgba(240, 242, 245, 0.85)), url('../images/1.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
   display: grid;
   width: 96%;
   gap: 1.8rem;
   grid-template-columns: 14rem auto 16rem;
   margin: 0 auto;
+  color: var(--clr-dark);
+}
 
-   color: var(--clr-dark);
-  
+/* Night Mode Background with gentle gradient overlay */
+.dark-theme-variables .container {
+  background-image: linear-gradient(rgba(2,6,23,0.85), rgba(2,6,23,0.75)), url('../images/1.jpg');
 }
 
 a{
@@ -421,6 +421,8 @@ Right Side
   display: flex;
   justify-content: start;
   gap: 2rem;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .right .top button{
@@ -881,6 +883,8 @@ body:not(.dark-theme-variables) aside {
 
 body:not(.dark-theme-variables) aside .sidebar a {
   color: var(--clr-dark);
+  border-radius: 0.85rem;
+  margin-right: 0.75rem;
 }
 
 body:not(.dark-theme-variables) aside .sidebar a:hover {
@@ -902,6 +906,48 @@ body:not(.dark-theme-variables) .right .top {
   border-radius: var(--border-radius-2);
   padding: 1rem;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+body:not(.dark-theme-variables) aside .top,
+body:not(.dark-theme-variables) aside .sidebar,
+body:not(.dark-theme-variables) .right .theme-toggler,
+body:not(.dark-theme-variables) main .date {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(115, 128, 236, 0.12);
+  box-shadow: 0 10px 30px rgba(148, 163, 184, 0.12);
+}
+
+body:not(.dark-theme-variables) .logo h2,
+body:not(.dark-theme-variables) h1,
+body:not(.dark-theme-variables) h2,
+body:not(.dark-theme-variables) h3,
+body:not(.dark-theme-variables) h4,
+body:not(.dark-theme-variables) p,
+body:not(.dark-theme-variables) b,
+body:not(.dark-theme-variables) a,
+body:not(.dark-theme-variables) span {
+  color: inherit;
+}
+
+body:not(.dark-theme-variables) .container {
+  color: #0f172a;
+}
+
+body:not(.dark-theme-variables) p,
+body:not(.dark-theme-variables) .text-muted,
+body:not(.dark-theme-variables) aside .sidebar a {
+  color: #475569;
+}
+
+body:not(.dark-theme-variables) .profile .info p,
+body:not(.dark-theme-variables) .profile .info b,
+body:not(.dark-theme-variables) .right h1,
+body:not(.dark-theme-variables) .right h2,
+body:not(.dark-theme-variables) .right h3,
+body:not(.dark-theme-variables) .right .insights p,
+body:not(.dark-theme-variables) main,
+body:not(.dark-theme-variables) main input {
+  color: #0f172a;
 }
 
 /* Insights/Stats Cards */

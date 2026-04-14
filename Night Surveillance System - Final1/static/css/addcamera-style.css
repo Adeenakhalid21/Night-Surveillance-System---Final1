@@ -48,20 +48,20 @@
   cursor: pointer;
 } */
 
-.left {
+.camera-container .left {
   float: left;
 }
 
-.right {
+.camera-container .right {
   float: right;
 }
 
-.icon {
+.camera-container .icon {
   font-size: 36px;
   color: #553ec8;
 }
 
-.icon:hover {
+.camera-container .icon:hover {
   color: #333;
 }
 

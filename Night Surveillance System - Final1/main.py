@@ -2,6 +2,7 @@ import cv2
 from flask import Flask, render_template, Response, request, jsonify, redirect, url_for, session
 import sqlite3
 import re, os
+import json
 from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
@@ -12,6 +13,7 @@ from email.mime.text import MIMEText
 import threading
 import time
 from datetime import timedelta
+from collections import deque
 import uuid
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.utils import secure_filename
@@ -65,8 +67,10 @@ prev_frame = None
 motion_detected = False
 
 # Global variable for anomaly alerts
-recent_anomalies = []
+recent_anomalies = deque(maxlen=200)
 anomalies_lock = threading.Lock()
+anomaly_event_counter = 0
+anomaly_last_emit = {}
 
 # Async image enhancement jobs
 enhancement_jobs = {}
@@ -105,6 +109,30 @@ def get_remembered_username_from_request() -> str:
     token = request.cookies.get(REMEMBER_COOKIE_NAME, '')
     return parse_remember_token(token) if token else ''
 
+
+def _restore_session_from_remember_cookie() -> bool:
+    remembered_identifier = get_remembered_username_from_request()
+    if not remembered_identifier:
+        return False
+
+    conn = get_db_connection()
+    try:
+        user = conn.execute('SELECT * FROM user WHERE LOWER(email) = ?', (remembered_identifier.lower(),)).fetchone()
+        if not user:
+            return False
+
+        session['loggedin'] = True
+        session['sno'] = user['sno']
+        session['firstname'] = user['firstname']
+        session['email'] = user['email']
+        session.permanent = True
+        return True
+    except Exception as exc:
+        print(f"[AUTH] Remember-me restore failed: {exc}")
+        return False
+    finally:
+        conn.close()
+
 # Get the directory where main.py is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -114,20 +142,84 @@ app.config['ALLOWED_EXTENSIONS'] = {'mp4', 'avi', 'mov', 'mkv'}
 app.config['ALLOWED_IMAGES'] = {'jpg', 'jpeg', 'png', 'bmp'}
 
 
+def _parse_label_set(raw_value: str) -> set[str]:
+    return {s.strip().lower() for s in (raw_value or '').split(',') if s.strip()}
+
+
 DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
-IMPORTANT_CLASSES = {s.strip().lower() for s in (os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife,gun') or 'person,backpack,knife,gun').split(',') if s.strip()}
+IMPORTANT_CLASSES = _parse_label_set(os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife,gun')) or {'person', 'backpack', 'knife', 'gun'}
 ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
 
 # Anomaly detection classes (abnormal behaviors/objects)
-ANOMALY_CLASSES = {s.strip().lower() for s in (os.getenv('ANOMALY_CLASSES', 'person,car,motorcycle,truck,backpack,knife,gun') or 'person,car,motorcycle,truck,backpack,knife,gun').split(',') if s.strip()}
+ANOMALY_CLASSES = _parse_label_set(os.getenv('ANOMALY_CLASSES', 'knife,gun,weapon,fire,fight,intruder')) or {'knife', 'gun', 'weapon', 'fire', 'fight', 'intruder'}
+ANOMALY_MATCH_ALL = bool(ANOMALY_CLASSES.intersection({'*', 'all'}))
 ANOMALY_CONF_MIN = float(os.getenv('ANOMALY_CONF_MIN', '0.5'))
+ANOMALY_MIN_BOX_AREA = int(float(os.getenv('ANOMALY_MIN_BOX_AREA', '1200')))
+ANOMALY_COOLDOWN_SEC = float(os.getenv('ANOMALY_COOLDOWN_SEC', '8'))
 ENABLE_ANOMALY_ALERTS = str(os.getenv('ENABLE_ANOMALY_ALERTS', '1')).strip().lower() in ('1','true','yes','on')
+
+
+@app.before_request
+def auto_login_from_remember_cookie():
+    if session.get('loggedin'):
+        return
+
+    public_endpoints = {
+        'index', 'login', 'signup', 'services', 'contact', 'about',
+        'night_shield_legal', 'static',
+    }
+    endpoint = request.endpoint or ''
+    if endpoint in public_endpoints:
+        return
+
+    _restore_session_from_remember_cookie()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 def allowed_image(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_IMAGES']
+
+
+def _normalize_label(label: str) -> str:
+    return str(label or '').strip().lower()
+
+
+def _is_anomaly_target(class_name: str) -> bool:
+    normalized = _normalize_label(class_name)
+    if not normalized:
+        return False
+    if ANOMALY_MATCH_ALL:
+        return True
+    return normalized in ANOMALY_CLASSES
+
+
+def _enqueue_anomaly_event(class_name: str, confidence: float, camera_id: int = 1) -> bool:
+    if not ENABLE_ANOMALY_ALERTS:
+        return False
+
+    if not _is_anomaly_target(class_name):
+        return False
+
+    now = time.time()
+    normalized = _normalize_label(class_name)
+
+    global anomaly_event_counter
+    with anomalies_lock:
+        last_seen = anomaly_last_emit.get(normalized, 0.0)
+        if now - last_seen < ANOMALY_COOLDOWN_SEC:
+            return False
+
+        anomaly_last_emit[normalized] = now
+        anomaly_event_counter += 1
+        recent_anomalies.append({
+            'id': anomaly_event_counter,
+            'class': class_name,
+            'confidence': float(confidence),
+            'timestamp': now,
+            'camera_id': camera_id,
+        })
+    return True
 
 
 def _new_enhancement_job(job_id: str) -> dict:
@@ -233,7 +325,7 @@ def _process_enhancement_job(job_id: str, original_path: str, original_filename:
         _mark_enhancement_failed(job_id, f'Enhancement failed: {exc}')
 
 def detect_anomalies(frame, camera_id=1):
-    """Detect anomalies in frame using YOLO and send alerts"""
+    """Detect anomaly candidates in frame using YOLO."""
     m = get_model()
     if m is None:
         return frame, []
@@ -244,9 +336,10 @@ def detect_anomalies(frame, camera_id=1):
     for detection in results[0].boxes:
         x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
         class_name = m.names[int(cls)]
+        bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
         
         # Check if detected class is in anomaly list
-        if class_name.lower() in ANOMALY_CLASSES and conf >= ANOMALY_CONF_MIN:
+        if conf >= ANOMALY_CONF_MIN and bbox_area >= ANOMALY_MIN_BOX_AREA and _is_anomaly_target(class_name):
             anomalies_detected.append({
                 'class': class_name,
                 'confidence': conf,
@@ -257,35 +350,6 @@ def detect_anomalies(frame, camera_id=1):
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
             label = f"ANOMALY: {class_name} {conf:.2f}"
             cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            
-            # Save anomaly image
-            os.makedirs('static/images/anomalies', exist_ok=True)
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}_{class_name}.jpg'
-            try:
-                cv2.imwrite(anomaly_image_path, frame)
-            except Exception as e:
-                print(f"Failed to save anomaly image: {e}")
-            
-            # Log anomaly event
-            try:
-                log_surveillance_event_db({
-                    'camera_id': camera_id,
-                    'event_type': 'anomaly_detected',
-                    'severity': 'high',
-                    'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
-                    'image_path': anomaly_image_path,
-                    'video_path': None
-                })
-            except Exception as e:
-                print(f"Failed to log anomaly: {e}")
-            
-            # Send alert if enabled
-            if ENABLE_ANOMALY_ALERTS:
-                subject = "⚠️ ANOMALY DETECTED!"
-                to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
-                body = f"ANOMALY ALERT: {class_name} detected with {conf:.2f} confidence at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\nPlease check the surveillance system immediately."
-                threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path)).start()
     
     return frame, anomalies_detected
 
@@ -495,29 +559,51 @@ def video_stream(source, stop_event):
             motion_detection(prev_frame, frame)
             if motion_detected:
                 try:
-                    enhanced_frame = enhance_image(frame)
-                except Exception:
-                    enhanced_frame = frame
-                try:
-                    output_frame = detect_objects_and_classify(enhanced_frame)
-                    # Also check for anomalies
+                    # Keep realtime detection stable: run on original frame without heavy still-image enhancement.
+                    detection_frame = frame.copy()
+                    output_frame = detect_objects_and_classify(detection_frame)
                     output_frame, anomalies = detect_anomalies(output_frame)
-                    if anomalies and ENABLE_ANOMALY_ALERTS:
-                        print(f"[ANOMALY] Detected {len(anomalies)} anomalies: {[a['class'] for a in anomalies]}")
-                    # Add to global anomaly list for SSE
-                    with anomalies_lock:
-                        for anomaly in anomalies:
-                            recent_anomalies.append({
-                                'class': anomaly['class'],
-                                'confidence': anomaly['confidence'],
-                                'timestamp': time.time()
-                            })
-                        # Keep only last 10 anomalies
-                        if len(recent_anomalies) > 10:
-                            recent_anomalies.pop(0)
+
+                    emitted_anomalies = []
+                    for anomaly in anomalies:
+                        if _enqueue_anomaly_event(anomaly['class'], anomaly['confidence']):
+                            emitted_anomalies.append(anomaly)
+
+                    if emitted_anomalies:
+                        print(f"[ANOMALY] Emitted {len(emitted_anomalies)} alert(s): {[a['class'] for a in emitted_anomalies]}")
+                        os.makedirs('static/images/anomalies', exist_ok=True)
+
+                        for anomaly in emitted_anomalies:
+                            class_name = anomaly['class']
+                            conf = anomaly['confidence']
+                            timestamp = time.strftime("%Y%m%d_%H%M%S")
+                            anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}_{class_name}.jpg'
+
+                            try:
+                                cv2.imwrite(anomaly_image_path, output_frame)
+                            except Exception as e:
+                                print(f"Failed to save anomaly image: {e}")
+
+                            try:
+                                log_surveillance_event_db({
+                                    'camera_id': 1,
+                                    'event_type': 'anomaly_detected',
+                                    'severity': 'high',
+                                    'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
+                                    'image_path': anomaly_image_path,
+                                    'video_path': None
+                                })
+                            except Exception as e:
+                                print(f"Failed to log anomaly: {e}")
+
+                            if ENABLE_ANOMALY_ALERTS:
+                                subject = "⚠️ ANOMALY DETECTED!"
+                                to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+                                body = f"ANOMALY ALERT: {class_name} detected with {conf:.2f} confidence at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\nPlease check the surveillance system immediately."
+                                threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path)).start()
                 except Exception as e:
                     print(f"Detection error: {e}")
-                    output_frame = enhanced_frame
+                    output_frame = frame
 
         # Always encode a frame (prevents broken image tag showing alt text)
         try:
@@ -545,11 +631,15 @@ def index():
 
 @app.route('/upload')
 def upload():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     video_path = request.args.get('video_path')
     return render_template('upload_video.html', video_path=video_path)
 
 @app.route('/upload_video', methods=['GET', 'POST'])
 def upload_video():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     if request.method == 'POST':
         if 'video' not in request.files:
             return 'No video file uploaded'
@@ -567,6 +657,8 @@ def upload_video():
 #seperate route for uploaded video processing 
 @app.route('/upload_video_feed')
 def upload_video_feed():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     video_path = request.args.get('video_path')
     if video_path:
         stop_event = threading.Event()
@@ -871,6 +963,8 @@ def logout():
 
 @app.route('/lowlight_detection', methods=['GET', 'POST'])
 def lowlight_detection():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     if request.method == 'POST':
         if 'image' not in request.files:
             return jsonify({'error': 'No image file provided'}), 400
@@ -944,6 +1038,8 @@ def lowlight_detection():
 
 @app.route('/image_enhancement', methods=['GET', 'POST'])
 def image_enhancement():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     if request.method == 'POST':
         if 'image' not in request.files:
             return jsonify({'error': 'No image file provided'}), 400
@@ -974,6 +1070,7 @@ def image_enhancement():
             'contrast': _safe_float('contrast', 65),
             'sharpness': _safe_float('sharpness', 60),
             'denoise': _safe_float('denoise', 55),
+            'upscale': _safe_float('upscale', 70),
         }
 
         job_id = uuid.uuid4().hex
@@ -1002,6 +1099,8 @@ def image_enhancement_progress(job_id):
 
 @app.route('/dashboard')
 def dashboard():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     cam_count = dataset_count = detections_count = events_count = 0
     try:
         conn = get_db_connection()
@@ -1026,10 +1125,14 @@ def dashboard():
 
 @app.route('/addCamera')
 def addCamera():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     return render_template('addCamera.html')
 
 @app.route('/cam', methods=['GET', 'POST'])
 def cam():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     mesage=''
     if request.method == 'POST' and 'camname' in request.form and 'camurl' in request.form:
         camname = request.form['camname']
@@ -1073,25 +1176,51 @@ def services():
 # Route for video stream
 @app.route('/video_feed')
 def video_feed():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     stop_event = threading.Event()
     return Response(video_stream(0, stop_event), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/anomaly_alerts')
 def anomaly_alerts():
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
     """Server-Sent Events endpoint for real-time anomaly alerts"""
     def generate():
-        last_sent_count = 0
+        with anomalies_lock:
+            last_sent_id = anomaly_event_counter
+
         while True:
+            events_to_send = []
             with anomalies_lock:
-                if len(recent_anomalies) > last_sent_count:
-                    # Send new anomalies
-                    for i in range(last_sent_count, len(recent_anomalies)):
-                        anomaly = recent_anomalies[i]
-                        yield f"data: {{\"class\": \"{anomaly['class']}\", \"confidence\": {anomaly['confidence']:.2f}, \"timestamp\": {anomaly['timestamp']}}}\n\n"
-                    last_sent_count = len(recent_anomalies)
-            time.sleep(0.5)  # Check every 500ms
-    
-    return Response(generate(), mimetype='text/event-stream')
+                events_to_send = [
+                    anomaly for anomaly in recent_anomalies
+                    if anomaly.get('id', 0) > last_sent_id
+                ]
+
+            for anomaly in events_to_send:
+                payload = json.dumps({
+                    'id': anomaly.get('id'),
+                    'class': anomaly.get('class'),
+                    'confidence': round(float(anomaly.get('confidence', 0.0)), 4),
+                    'timestamp': anomaly.get('timestamp'),
+                    'camera_id': anomaly.get('camera_id', 1),
+                })
+                yield f"data: {payload}\n\n"
+                last_sent_id = anomaly.get('id', last_sent_id)
+
+            # Keep-alive comment so browsers keep SSE open even when no events.
+            yield ": keep-alive\n\n"
+            time.sleep(1.0)
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
 
 # Dataset Management Routes
 @app.route('/datasets')

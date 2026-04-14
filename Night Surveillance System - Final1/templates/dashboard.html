@@ -210,6 +210,9 @@
      const cameraBtnText = document.getElementById('camera-btn-text');
      let cameraActive = false;
      let eventSource = null;
+    let lastAnomalyEventId = 0;
+    const anomalyPopupCooldownMs = 6000;
+    const anomalyPopupByClass = new Map();
 
      toggleCameraBtn.addEventListener('click', function() {
        cameraActive = !cameraActive;
@@ -241,7 +244,33 @@
        eventSource = new EventSource('{{ url_for("anomaly_alerts") }}');
        
        eventSource.onmessage = function(event) {
-         const data = JSON.parse(event.data);
+         let data;
+         try {
+           data = JSON.parse(event.data);
+         } catch (err) {
+           return;
+         }
+
+         if (!data || !data.class || typeof data.confidence !== 'number') {
+           return;
+         }
+
+         const eventId = Number(data.id || 0);
+         if (eventId && eventId <= lastAnomalyEventId) {
+           return;
+         }
+         if (eventId) {
+           lastAnomalyEventId = eventId;
+         }
+
+         const classKey = String(data.class).trim().toLowerCase();
+         const now = Date.now();
+         const lastPopupAt = anomalyPopupByClass.get(classKey) || 0;
+         if (now - lastPopupAt < anomalyPopupCooldownMs) {
+           return;
+         }
+         anomalyPopupByClass.set(classKey, now);
+
          showAnomalyAlert(data.class, data.confidence);
        };
        

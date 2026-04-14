@@ -71,7 +71,7 @@
           <span class="material-symbols-sharp">auto_fix_high</span>
           Low-Light Image Enhancement
         </h1>
-        <p>Powerful multi-stage night enhancement with denoising, adaptive contrast, gamma correction, sharpening, and color boosting.</p>
+        <p>Powerful multi-stage night enhancement with denoising, adaptive contrast, gamma correction, sharpening, color boosting, and upscale recovery.</p>
       </section>
 
       <section class="enhancement-grid">
@@ -128,6 +128,12 @@
               <output id="denoiseValue">55</output>
               <input type="range" min="0" max="100" value="55" id="denoiseSlider">
             </label>
+
+            <label class="slider-row">
+              <span>Upscale</span>
+              <output id="upscaleValue">70</output>
+              <input type="range" min="0" max="100" value="70" id="upscaleSlider">
+            </label>
           </div>
 
           <button class="primary-action" id="enhanceBtn" type="button">
@@ -162,31 +168,36 @@
           <div class="progress-shell" id="progressShell">
             <h3>Enhancement Progress</h3>
             <ul class="stage-list" id="stageList">
-              <li data-stage="denoise"><span class="stage-icon">⬜</span> Stage 1: Denoising...</li>
-              <li data-stage="contrast"><span class="stage-icon">⬜</span> Stage 2: Contrast Enhancement...</li>
-              <li data-stage="gamma"><span class="stage-icon">⬜</span> Stage 3: Gamma Correction...</li>
-              <li data-stage="sharpen"><span class="stage-icon">⬜</span> Stage 4: Sharpening...</li>
-              <li data-stage="color"><span class="stage-icon">⬜</span> Stage 5: Color Boost...</li>
+              <li data-stage="denoise"><span class="stage-icon">[]</span> Stage 1: Denoising...</li>
+              <li data-stage="contrast"><span class="stage-icon">[]</span> Stage 2: Contrast Enhancement...</li>
+              <li data-stage="gamma"><span class="stage-icon">[]</span> Stage 3: Gamma Correction...</li>
+              <li data-stage="sharpen"><span class="stage-icon">[]</span> Stage 4: Sharpening...</li>
+              <li data-stage="color"><span class="stage-icon">[]</span> Stage 5: Color Boost...</li>
+              <li data-stage="upscale"><span class="stage-icon">[]</span> Stage 6: Upscaling...</li>
             </ul>
             <div class="job-status" id="jobStatus">Waiting for image...</div>
           </div>
 
           <div class="stats-grid" id="statsGrid" hidden>
             <article class="stat-card" data-stat="brightness_increase">
-              <h4>🌟 Brightness</h4>
+              <h4>Brightness</h4>
               <p class="stat-value" id="statBrightness">+0</p>
             </article>
             <article class="stat-card" data-stat="contrast_improvement">
-              <h4>🎯 Contrast</h4>
+              <h4>Contrast</h4>
               <p class="stat-value" id="statContrast">+0%</p>
             </article>
             <article class="stat-card" data-stat="noise_reduction">
-              <h4>🔇 Noise</h4>
+              <h4>Noise</h4>
               <p class="stat-value" id="statNoise">-0%</p>
             </article>
             <article class="stat-card" data-stat="sharpness_boost">
-              <h4>🔍 Sharpness</h4>
+              <h4>Sharpness</h4>
               <p class="stat-value" id="statSharpness">+0%</p>
+            </article>
+            <article class="stat-card" data-stat="resolution_gain">
+              <h4>Upscale</h4>
+              <p class="stat-value" id="statResolution">+0%</p>
             </article>
           </div>
 
@@ -211,8 +222,8 @@
         </button>
 
         <div class="theme-toggler">
-          <span class="material-symbols-sharp">light_mode</span>
-          <span class="material-symbols-sharp active">dark_mode</span>
+          <span class="material-symbols-sharp active">light_mode</span>
+          <span class="material-symbols-sharp">dark_mode</span>
         </div>
 
         <div class="profile">
