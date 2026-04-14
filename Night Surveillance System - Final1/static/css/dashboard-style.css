@@ -249,8 +249,8 @@ b{
 
 .right .insights{
    display: grid;
-   grid-template-columns: repeat(3,1fr);
-   gap: 1.6rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
 }
 .right .insights>div{
   background-color: var(--clr-white);
@@ -259,6 +259,7 @@ b{
    margin-top: 1rem;
    box-shadow: var(--box-shadow);
    transition: all .3s ease;
+  min-width: 0;
 }
 
 /* Simple reusable card */
@@ -528,6 +529,11 @@ MEDIA QUERY
       display: grid;
       grid-template-columns: repeat(1,1fr);
     }
+
+    .right .insights {
+      grid-template-columns: 1fr;
+      gap: 0.9rem;
+    }
 }
 
 /* ****************
@@ -600,8 +606,8 @@ MEDIA QUERY PHONE
  .right .insights{
   display: grid;
   grid-template-columns: repeat(1,1fr);
-  gap: 1.6rem;
-  padding: 40px;
+  gap: 0.9rem;
+  padding: 0.75rem 0;
  }
  
 
