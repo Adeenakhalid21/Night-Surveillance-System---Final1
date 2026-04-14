@@ -30,6 +30,7 @@ def resolve_default_weights() -> str:
         print(f"[YOLO] configured weights not found: {env_weights}, using best available local checkpoint")
 
     candidates = [
+        "runs/detect/gun_knife_finetune_v4/weights/best.pt",
         "runs/detect/gun_knife_hand_ft/weights/best.pt",
         "runs/detect/dataset2_weapon_detection_best.pt",
         "runs/detect/gun_knife_binary/weights/best.pt",
@@ -71,6 +72,12 @@ recent_anomalies = deque(maxlen=200)
 anomalies_lock = threading.Lock()
 anomaly_event_counter = 0
 anomaly_last_emit = {}
+
+# Runtime throttles for detection side effects (DB writes, snapshots, event logs)
+detection_runtime_lock = threading.Lock()
+detection_last_db_emit = {}
+detection_last_alert_emit = {}
+detection_last_snapshot_emit = {}
 
 # Async image enhancement jobs
 enhancement_jobs = {}
@@ -158,6 +165,30 @@ ANOMALY_MIN_BOX_AREA = int(float(os.getenv('ANOMALY_MIN_BOX_AREA', '1200')))
 ANOMALY_COOLDOWN_SEC = float(os.getenv('ANOMALY_COOLDOWN_SEC', '8'))
 ENABLE_ANOMALY_ALERTS = str(os.getenv('ENABLE_ANOMALY_ALERTS', '1')).strip().lower() in ('1','true','yes','on')
 
+# Stream/detection performance tuning
+STREAM_FRAME_WIDTH = int(float(os.getenv('STREAM_FRAME_WIDTH', '640')))
+STREAM_FRAME_HEIGHT = int(float(os.getenv('STREAM_FRAME_HEIGHT', '480')))
+STREAM_GRAB_SKIP = max(0, int(float(os.getenv('STREAM_GRAB_SKIP', '1'))))
+STREAM_JPEG_QUALITY = int(max(50, min(95, float(os.getenv('STREAM_JPEG_QUALITY', '75')))))
+
+DETECTION_MIN_INTERVAL_SEC = float(os.getenv('DETECTION_MIN_INTERVAL_SEC', '0.35'))
+DETECTION_DB_COOLDOWN_SEC = float(os.getenv('DETECTION_DB_COOLDOWN_SEC', '2.0'))
+DETECTION_ALERT_COOLDOWN_SEC = float(os.getenv('DETECTION_ALERT_COOLDOWN_SEC', '12.0'))
+DETECTION_SNAPSHOT_COOLDOWN_SEC = float(os.getenv('DETECTION_SNAPSHOT_COOLDOWN_SEC', '4.0'))
+MOTION_MIN_CONTOUR_AREA = float(os.getenv('MOTION_MIN_CONTOUR_AREA', '850'))
+DETECTION_CONF_MIN = float(os.getenv('DETECTION_CONF_MIN', '0.35'))
+DETECTION_DISPLAY_CONF_MIN = float(os.getenv('DETECTION_DISPLAY_CONF_MIN', '0.22'))
+TRACK_IOU_THRESHOLD = float(os.getenv('TRACK_IOU_THRESHOLD', '0.32'))
+TRACK_BBOX_EMA_ALPHA = float(os.getenv('TRACK_BBOX_EMA_ALPHA', '0.56'))
+TRACK_CONF_EMA_ALPHA = float(os.getenv('TRACK_CONF_EMA_ALPHA', '0.42'))
+TRACK_MIN_HITS = max(1, int(float(os.getenv('TRACK_MIN_HITS', '2'))))
+TRACK_STALE_SEC = float(os.getenv('TRACK_STALE_SEC', '1.2'))
+TRACK_CONF_DECAY_PER_SEC = float(os.getenv('TRACK_CONF_DECAY_PER_SEC', '0.22'))
+
+DESIRED_CLASSES = {
+    'person', 'car', 'motorcycle', 'bicycle', 'bus', 'truck', 'knife', 'gun'
+}
+
 
 @app.before_request
 def auto_login_from_remember_cookie():
@@ -220,6 +251,208 @@ def _enqueue_anomaly_event(class_name: str, confidence: float, camera_id: int = 
             'camera_id': camera_id,
         })
     return True
+
+
+def _allow_with_cooldown(bucket: dict, key: str, cooldown_sec: float) -> bool:
+    now = time.time()
+    with detection_runtime_lock:
+        last_time = bucket.get(key, 0.0)
+        if now - last_time < cooldown_sec:
+            return False
+        bucket[key] = now
+        return True
+
+
+def _bbox_iou(box_a, box_b) -> float:
+    ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+    bx1, by1, bx2, by2 = [float(v) for v in box_b]
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union_area = area_a + area_b - inter_area
+    if union_area <= 0.0:
+        return 0.0
+    return inter_area / union_area
+
+
+def _blend_bbox(prev_bbox, new_bbox, alpha: float):
+    a = max(0.0, min(1.0, float(alpha)))
+    return tuple(((1.0 - a) * float(prev_bbox[i])) + (a * float(new_bbox[i])) for i in range(4))
+
+
+class SimpleObjectTracker:
+    def __init__(
+        self,
+        iou_threshold: float,
+        bbox_alpha: float,
+        conf_alpha: float,
+        min_hits: int,
+        stale_sec: float,
+        display_conf_min: float,
+        conf_decay_per_sec: float,
+    ) -> None:
+        self.iou_threshold = float(max(0.05, min(0.9, iou_threshold)))
+        self.bbox_alpha = float(max(0.05, min(0.95, bbox_alpha)))
+        self.conf_alpha = float(max(0.05, min(0.95, conf_alpha)))
+        self.min_hits = int(max(1, min_hits))
+        self.stale_sec = float(max(0.2, stale_sec))
+        self.display_conf_min = float(max(0.01, min(0.95, display_conf_min)))
+        self.conf_decay_per_sec = float(max(0.0, conf_decay_per_sec))
+        self._next_track_id = 1
+        self._tracks = {}
+
+    def _prune_stale(self, now: float) -> None:
+        stale_ids = [
+            tid for tid, track in self._tracks.items()
+            if (now - float(track.get('last_seen', 0.0))) > self.stale_sec
+        ]
+        for tid in stale_ids:
+            self._tracks.pop(tid, None)
+
+    def update(self, detections: list[dict], now: float | None = None) -> list[dict]:
+        now = float(now if now is not None else time.time())
+        self._prune_stale(now)
+
+        normalized_detections = []
+        for det in detections or []:
+            try:
+                bbox = tuple(float(v) for v in det['bbox'])
+                conf = float(det.get('confidence', 0.0))
+                class_name = str(det.get('class') or '')
+            except Exception:
+                continue
+            if not class_name:
+                continue
+            normalized_detections.append({
+                'class': class_name,
+                'class_key': _normalize_label(class_name),
+                'confidence': conf,
+                'bbox': bbox,
+                'bbox_area': max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1]),
+            })
+
+        candidate_pairs = []
+        for track_id, track in self._tracks.items():
+            track_class = track.get('class_key', '')
+            if not track_class:
+                continue
+            for det_idx, det in enumerate(normalized_detections):
+                if det['class_key'] != track_class:
+                    continue
+                iou = _bbox_iou(track['bbox'], det['bbox'])
+                if iou >= self.iou_threshold:
+                    candidate_pairs.append((iou, track_id, det_idx))
+
+        candidate_pairs.sort(key=lambda item: item[0], reverse=True)
+
+        matched_tracks = set()
+        matched_dets = set()
+        for _, track_id, det_idx in candidate_pairs:
+            if track_id in matched_tracks or det_idx in matched_dets:
+                continue
+            track = self._tracks.get(track_id)
+            if not track:
+                continue
+
+            det = normalized_detections[det_idx]
+            track['bbox'] = _blend_bbox(track['bbox'], det['bbox'], self.bbox_alpha)
+            track['confidence'] = ((1.0 - self.conf_alpha) * float(track['confidence'])) + (self.conf_alpha * float(det['confidence']))
+            track['class'] = det['class']
+            track['class_key'] = det['class_key']
+            track['bbox_area'] = det['bbox_area']
+            track['last_seen'] = now
+            track['hits'] = int(track.get('hits', 0)) + 1
+
+            matched_tracks.add(track_id)
+            matched_dets.add(det_idx)
+
+        for det_idx, det in enumerate(normalized_detections):
+            if det_idx in matched_dets:
+                continue
+            track_id = self._next_track_id
+            self._next_track_id += 1
+            self._tracks[track_id] = {
+                'id': track_id,
+                'class': det['class'],
+                'class_key': det['class_key'],
+                'confidence': det['confidence'],
+                'bbox': det['bbox'],
+                'bbox_area': det['bbox_area'],
+                'created_at': now,
+                'last_seen': now,
+                'hits': 1,
+            }
+
+        return self.get_active_tracks(now)
+
+    def get_active_tracks(self, now: float | None = None) -> list[dict]:
+        now = float(now if now is not None else time.time())
+        self._prune_stale(now)
+
+        active = []
+        for track_id, track in self._tracks.items():
+            age_since_seen = max(0.0, now - float(track.get('last_seen', now)))
+            decayed_conf = max(0.0, float(track.get('confidence', 0.0)) - (age_since_seen * self.conf_decay_per_sec))
+
+            if decayed_conf < self.display_conf_min:
+                continue
+
+            if int(track.get('hits', 1)) < self.min_hits and age_since_seen > (DETECTION_MIN_INTERVAL_SEC * 0.75):
+                continue
+
+            x1, y1, x2, y2 = [int(round(v)) for v in track['bbox']]
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            active.append({
+                'track_id': track_id,
+                'track_hits': int(track.get('hits', 1)),
+                'track_age_sec': age_since_seen,
+                'class': track.get('class', ''),
+                'confidence': decayed_conf,
+                'bbox': (x1, y1, x2, y2),
+                'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
+            })
+
+        return active
+
+
+def _run_detection_inference(frame):
+    m = get_model()
+    if m is None:
+        return []
+
+    results = m(frame, verbose=False)
+    parsed = []
+    for detection in results[0].boxes:
+        x1 = int(detection.xyxy[0][0])
+        y1 = int(detection.xyxy[0][1])
+        x2 = int(detection.xyxy[0][2])
+        y2 = int(detection.xyxy[0][3])
+        conf = float(detection.conf[0])
+        if conf < DETECTION_CONF_MIN:
+            continue
+        cls = int(detection.cls[0])
+        class_name = m.names[int(cls)]
+        class_key = _normalize_label(class_name)
+        if class_key and class_key not in DESIRED_CLASSES and not _is_anomaly_target(class_name):
+            continue
+        parsed.append({
+            'class': class_name,
+            'confidence': conf,
+            'bbox': (x1, y1, x2, y2),
+            'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
+        })
+    return parsed
 
 
 def _new_enhancement_job(job_id: str) -> dict:
@@ -293,6 +526,7 @@ def _process_enhancement_job(job_id: str, original_path: str, original_filename:
         enhanced_img = outcome['enhanced_image']
         comparison_img = outcome['comparison_image']
         stats = outcome['stats']
+        upscale_meta = outcome.get('upscale_meta', {})
 
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         safe_name = secure_filename(original_filename) or f'image_{timestamp}.jpg'
@@ -319,24 +553,27 @@ def _process_enhancement_job(job_id: str, original_path: str, original_filename:
                 'enhanced_size_kb': size_kb,
                 'download_name': f'enhanced_{stem}.jpg',
                 'stats': stats,
+                'upscale_meta': upscale_meta,
             },
         )
     except Exception as exc:
         _mark_enhancement_failed(job_id, f'Enhancement failed: {exc}')
 
-def detect_anomalies(frame, camera_id=1):
+def detect_anomalies(frame, camera_id=1, detections=None):
     """Detect anomaly candidates in frame using YOLO."""
-    m = get_model()
-    if m is None:
+    if detections is None:
+        detections = _run_detection_inference(frame)
+
+    if not detections:
         return frame, []
-    
-    results = m(frame)
+
     anomalies_detected = []
-    
-    for detection in results[0].boxes:
-        x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
-        class_name = m.names[int(cls)]
-        bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
+
+    for detection in detections:
+        x1, y1, x2, y2 = detection['bbox']
+        conf = float(detection['confidence'])
+        class_name = detection['class']
+        bbox_area = int(detection.get('bbox_area', max(0, x2 - x1) * max(0, y2 - y1)))
         
         # Check if detected class is in anomaly list
         if conf >= ANOMALY_CONF_MIN and bbox_area >= ANOMALY_MIN_BOX_AREA and _is_anomaly_target(class_name):
@@ -364,42 +601,86 @@ def motion_detection(frame1, frame2):
     dilated = cv2.dilate(thresh, None, iterations=3)
     contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-    motion_detected = len(contours) > 0
+    motion_detected = any(cv2.contourArea(c) >= MOTION_MIN_CONTOUR_AREA for c in contours)
 
 
-def detect_objects_and_classify(frame, camera_id=1):
-    # Perform object detection
-    m = get_model()
-    if m is None:
+def detect_objects_and_classify(frame, camera_id=1, detections=None):
+    if detections is None:
+        detections = _run_detection_inference(frame)
+
+    if not detections:
         return frame
-    results = m(frame)
 
-    # Define the classes you want to detect
-    desired_classes = ["person", "car", "motorcycle", "bicycle", "bus", "truck", "knife", "gun"]
+    # Save at most one frame snapshot per processed frame when needed.
+    frame_snapshot_path = None
+    snapshot_dir_ready = False
 
-    # Iterate through detected objects
-    for detection in results[0].boxes:
-        x1, y1, x2, y2, conf, cls = int(detection.xyxy[0][0]), int(detection.xyxy[0][1]), int(detection.xyxy[0][2]), int(detection.xyxy[0][3]), float(detection.conf[0]), int(detection.cls[0])
-        class_name = m.names[int(cls)]
-        label = f"{class_name} {conf:.2f}"
+    for detection in detections:
+        x1, y1, x2, y2 = detection['bbox']
+        conf = float(detection['confidence'])
+        class_name = detection['class']
+        class_key = _normalize_label(class_name)
+        track_id = int(detection.get('track_id', 0))
+        track_hits = int(detection.get('track_hits', 1))
+        track_age_sec = float(detection.get('track_age_sec', 0.0))
+
+        if class_key not in DESIRED_CLASSES:
+            continue
+
+        # Ignore weak stale tracks so visuals remain stable and meaningful.
+        if conf < DETECTION_DISPLAY_CONF_MIN:
+            continue
+
+        if track_hits < TRACK_MIN_HITS and conf < max(DETECTION_CONF_MIN + 0.1, 0.55):
+            continue
+
+        track_suffix = f" #{track_id}" if track_id > 0 else ""
+        label = f"{class_name}{track_suffix} {conf:.2f}"
+
+        if track_age_sec > max(0.25, DETECTION_MIN_INTERVAL_SEC):
+            box_color = (0, 205, 255)
+        else:
+            box_color = (0, 255, 0)
 
         # Draw bounding box and label on the frame
-        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-        cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+        cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
 
-        # Filter out classes not in desired_classes
-        if class_name in desired_classes:
-            os.makedirs('static/images', exist_ok=True)
-            # Always save a timestamped snapshot to static/images (ignored by git)
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            detection_image_path = f'static/images/detection_{timestamp}_{class_name}.jpg'
-            try:
-                cv2.imwrite(detection_image_path, frame)
-            except Exception as e:
-                print(f"Failed to save detection image: {e}")
+        needs_db = not DISABLE_DETECTION_DB and _allow_with_cooldown(
+            detection_last_db_emit,
+            f"{camera_id}:{class_key}",
+            DETECTION_DB_COOLDOWN_SEC,
+        )
+        needs_alert = class_key in IMPORTANT_CLASSES and conf >= ALERT_CONF_MIN and _allow_with_cooldown(
+            detection_last_alert_emit,
+            f"{camera_id}:{class_key}",
+            DETECTION_ALERT_COOLDOWN_SEC,
+        )
+
+        needs_snapshot = needs_db or needs_alert
+        detection_image_path = None
+
+        if needs_snapshot:
+            if frame_snapshot_path is None and _allow_with_cooldown(
+                detection_last_snapshot_emit,
+                f"{camera_id}:snapshot",
+                DETECTION_SNAPSHOT_COOLDOWN_SEC,
+            ):
+                if not snapshot_dir_ready:
+                    os.makedirs('static/images', exist_ok=True)
+                    snapshot_dir_ready = True
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                frame_snapshot_path = f'static/images/detection_{timestamp}.jpg'
+                try:
+                    cv2.imwrite(frame_snapshot_path, frame)
+                except Exception as e:
+                    print(f"Failed to save detection image: {e}")
+                    frame_snapshot_path = None
+
+            detection_image_path = frame_snapshot_path
 
             # Optionally store detection rows (disabled by default)
-            if not DISABLE_DETECTION_DB:
+            if needs_db:
                 save_detection_to_dataset_db({
                     'camera_id': camera_id,
                     'object_class': class_name,
@@ -414,7 +695,7 @@ def detect_objects_and_classify(frame, camera_id=1):
 
 
             # Only log/alert important items
-            if class_name.lower() in IMPORTANT_CLASSES and conf >= ALERT_CONF_MIN:
+            if needs_alert:
                 log_surveillance_event_db({
                     'camera_id': camera_id,
                     'event_type': f'{class_name}_detected',
@@ -423,18 +704,12 @@ def detect_objects_and_classify(frame, camera_id=1):
                     'image_path': detection_image_path
                 })
 
-                # Keep the last detection as a stable filename for quick email attach
-                att = 'static/images/detected_frame.jpg'
-                try:
-                    cv2.imwrite(att, frame)
-                except Exception:
-                    pass
-
                 # Send email alert in a separate thread
-                subject = "Motion Detected!"
-                to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
-                body = f"Motion of {class_name} has been detected by the surveillance system."
-                threading.Thread(target=send_email_alert, args=(subject, body, to, att)).start()
+                if detection_image_path:
+                    subject = "Motion Detected!"
+                    to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+                    body = f"Motion of {class_name} has been detected by the surveillance system."
+                    threading.Thread(target=send_email_alert, args=(subject, body, to, detection_image_path)).start()
 
     return frame
 
@@ -528,8 +803,12 @@ def send_email_alert(subject, body, to, att):
 def video_stream(source, stop_event):
     global prev_frame, motion_detected
     
-    # Capture video from webcam/ uploaded video
+    # Capture video from webcam/uploaded video and keep driver buffer shallow.
     cap = cv2.VideoCapture(source)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
     
 
     # Initialize previous frame
@@ -538,31 +817,50 @@ def video_stream(source, stop_event):
         print("Error: Could not read the initial frame.")
         return
     
-    prev_frame = cv2.resize(prev_frame, (640, 480))
+    prev_frame = cv2.resize(prev_frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
+    last_detection_ts = 0.0
+    tracker = SimpleObjectTracker(
+        iou_threshold=TRACK_IOU_THRESHOLD,
+        bbox_alpha=TRACK_BBOX_EMA_ALPHA,
+        conf_alpha=TRACK_CONF_EMA_ALPHA,
+        min_hits=TRACK_MIN_HITS,
+        stale_sec=TRACK_STALE_SEC,
+        display_conf_min=DETECTION_DISPLAY_CONF_MIN,
+        conf_decay_per_sec=TRACK_CONF_DECAY_PER_SEC,
+    )
 
     while not stop_event.is_set() and cap.isOpened():
-        # Skip a few frames for efficiency
-        for _ in range(3):
-            cap.read()
+        # Skip/grab frames without decoding all of them to reduce processing backlog.
+        for _ in range(STREAM_GRAB_SKIP):
+            cap.grab()
 
         ret, frame = cap.read()
         if not ret:
             break
 
         # Resize for consistent processing speed
-        frame = cv2.resize(frame, (640, 480))
+        frame = cv2.resize(frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
 
         # Default: send raw frame (ensures stream never blanks)
         output_frame = frame
 
         if prev_frame is not None:
             motion_detection(prev_frame, frame)
-            if motion_detected:
-                try:
-                    # Keep realtime detection stable: run on original frame without heavy still-image enhancement.
+            try:
+                now = time.time()
+                should_run_detection = (now - last_detection_ts) >= DETECTION_MIN_INTERVAL_SEC
+
+                if should_run_detection:
+                    raw_detections = _run_detection_inference(frame)
+                    tracked_detections = tracker.update(raw_detections, now=now)
+                    last_detection_ts = now
+                else:
+                    tracked_detections = tracker.get_active_tracks(now=now)
+
+                if tracked_detections:
                     detection_frame = frame.copy()
-                    output_frame = detect_objects_and_classify(detection_frame)
-                    output_frame, anomalies = detect_anomalies(output_frame)
+                    output_frame = detect_objects_and_classify(detection_frame, detections=tracked_detections)
+                    output_frame, anomalies = detect_anomalies(output_frame, detections=tracked_detections)
 
                     emitted_anomalies = []
                     for anomaly in anomalies:
@@ -573,41 +871,54 @@ def video_stream(source, stop_event):
                         print(f"[ANOMALY] Emitted {len(emitted_anomalies)} alert(s): {[a['class'] for a in emitted_anomalies]}")
                         os.makedirs('static/images/anomalies', exist_ok=True)
 
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}.jpg'
+                        anomaly_image_saved = False
+
+                        try:
+                            anomaly_image_saved = bool(cv2.imwrite(anomaly_image_path, output_frame))
+                        except Exception as e:
+                            anomaly_image_saved = False
+                            print(f"Failed to save anomaly image: {e}")
+
                         for anomaly in emitted_anomalies:
                             class_name = anomaly['class']
                             conf = anomaly['confidence']
-                            timestamp = time.strftime("%Y%m%d_%H%M%S")
-                            anomaly_image_path = f'static/images/anomalies/anomaly_{timestamp}_{class_name}.jpg'
-
-                            try:
-                                cv2.imwrite(anomaly_image_path, output_frame)
-                            except Exception as e:
-                                print(f"Failed to save anomaly image: {e}")
-
                             try:
                                 log_surveillance_event_db({
                                     'camera_id': 1,
                                     'event_type': 'anomaly_detected',
                                     'severity': 'high',
                                     'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
-                                    'image_path': anomaly_image_path,
+                                    'image_path': anomaly_image_path if anomaly_image_saved else None,
                                     'video_path': None
                                 })
                             except Exception as e:
                                 print(f"Failed to log anomaly: {e}")
 
-                            if ENABLE_ANOMALY_ALERTS:
-                                subject = "⚠️ ANOMALY DETECTED!"
-                                to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
-                                body = f"ANOMALY ALERT: {class_name} detected with {conf:.2f} confidence at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\nPlease check the surveillance system immediately."
-                                threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path)).start()
-                except Exception as e:
-                    print(f"Detection error: {e}")
-                    output_frame = frame
+                        if ENABLE_ANOMALY_ALERTS and anomaly_image_saved:
+                            summary = ", ".join(
+                                f"{a['class']} ({a['confidence']:.2f})" for a in emitted_anomalies
+                            )
+                            subject = "⚠️ ANOMALY DETECTED!"
+                            to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+                            body = (
+                                "ANOMALY ALERT: "
+                                f"{summary} at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                                "Please check the surveillance system immediately."
+                            )
+                            threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path)).start()
+            except Exception as e:
+                print(f"Detection error: {e}")
+                output_frame = frame
 
         # Always encode a frame (prevents broken image tag showing alt text)
         try:
-            _, jpeg = cv2.imencode('.jpg', output_frame)
+            _, jpeg = cv2.imencode(
+                '.jpg',
+                output_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY],
+            )
             frame_bytes = jpeg.tobytes()
         except Exception as e:
             print(f"JPEG encode failed: {e}")
@@ -1071,6 +1382,7 @@ def image_enhancement():
             'sharpness': _safe_float('sharpness', 60),
             'denoise': _safe_float('denoise', 55),
             'upscale': _safe_float('upscale', 70),
+            'upscale_scale': request.form.get('upscale_scale', '4'),
         }
 
         job_id = uuid.uuid4().hex

@@ -1,3 +1,8 @@
+import os
+import shutil
+from pathlib import Path
+from urllib.request import Request, urlopen
+
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
@@ -10,8 +15,26 @@ ENHANCEMENT_STAGES = [
     {'key': 'gamma', 'label': 'Gamma Correction'},
     {'key': 'sharpen', 'label': 'Sharpening'},
     {'key': 'color', 'label': 'Color Boost'},
-    {'key': 'upscale', 'label': 'Upscaling'},
+    {'key': 'upscale', 'label': 'Super-Resolution Upscaling'},
 ]
+
+
+SUPERRES_MODEL_DIR = Path(__file__).resolve().parent / 'models' / 'superres'
+SUPERRES_MODEL_SPECS = {
+    2: {
+        'name': 'edsr',
+        'filename': 'edsr_x2.pb',
+        'url': 'https://github.com/Saafke/EDSR_Tensorflow/raw/master/models/EDSR_x2.pb',
+    },
+    4: {
+        'name': 'edsr',
+        'filename': 'edsr_x4.pb',
+        'url': 'https://github.com/Saafke/EDSR_Tensorflow/raw/master/models/EDSR_x4.pb',
+    },
+}
+SUPERRES_ALLOWED_SCALES = (2, 4, 16)
+SUPERRES_MAX_OUTPUT_PIXELS = int(float(os.getenv('SUPERRES_MAX_OUTPUT_PIXELS', '120000000')))
+SUPERRES_DOWNLOAD_TIMEOUT_SEC = int(float(os.getenv('SUPERRES_DOWNLOAD_TIMEOUT_SEC', '180')))
 
 
 def enhancement_stage_keys() -> list[dict]:
@@ -29,16 +52,20 @@ def _normalize_settings(settings: dict | None) -> dict:
         'sharpness': 60.0,
         'denoise': 55.0,
         'upscale': 70.0,
+        'upscale_scale': 4,
     }
     if not settings:
         return defaults
 
     normalized = {}
-    for key, default_value in defaults.items():
+    for key in ('brightness', 'contrast', 'sharpness', 'denoise', 'upscale'):
+        default_value = defaults[key]
         try:
             normalized[key] = _clamp(float(settings.get(key, default_value)), 0.0, 100.0)
         except Exception:
             normalized[key] = default_value
+
+    normalized['upscale_scale'] = _resolve_upscale_scale(settings.get('upscale_scale', defaults['upscale_scale']))
     return normalized
 
 
@@ -59,29 +86,164 @@ def _build_gamma_lut(gamma: float) -> np.ndarray:
     return table
 
 
-def _resolve_upscale_factor(width: int, height: int, upscale_strength: float) -> float:
-    strength = _clamp(upscale_strength / 100.0, 0.0, 1.0)
-    if strength < 0.08:
-        return 1.0
-
-    longest_edge = max(width, height)
-    if longest_edge >= 1800:
-        base_factor = 1.15
-    elif longest_edge >= 1280:
-        base_factor = 1.35
-    elif longest_edge >= 900:
-        base_factor = 1.6
-    else:
-        base_factor = 2.0
-
-    factor = 1.0 + (base_factor - 1.0) * (0.35 + (0.65 * strength))
-    if strength > 0.85 and longest_edge < 1200:
-        factor += 0.15
-
-    return _clamp(factor, 1.0, 2.4)
+def _resolve_upscale_scale(scale_value) -> int:
+    try:
+        scale = int(float(scale_value))
+    except Exception:
+        scale = 4
+    return scale if scale in SUPERRES_ALLOWED_SCALES else 4
 
 
-def _enhance_pipeline(image_bgr: np.ndarray, settings: dict | None = None, progress_callback=None) -> tuple[Image.Image, dict]:
+def _download_model(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_suffix(destination.suffix + '.part')
+
+    request = Request(url, headers={'User-Agent': 'NightWatch-SuperRes/1.0'})
+    with urlopen(request, timeout=SUPERRES_DOWNLOAD_TIMEOUT_SEC) as response, temp_path.open('wb') as output_file:
+        shutil.copyfileobj(response, output_file)
+
+    temp_path.replace(destination)
+
+
+def _ensure_superres_model_file(scale: int) -> Path:
+    spec = SUPERRES_MODEL_SPECS.get(scale)
+    if not spec:
+        raise ValueError(f'No super-resolution model configured for x{scale}.')
+
+    model_path = SUPERRES_MODEL_DIR / spec['filename']
+    if model_path.exists() and model_path.stat().st_size > (1024 * 1024):
+        return model_path
+
+    _download_model(spec['url'], model_path)
+    if not model_path.exists() or model_path.stat().st_size <= (1024 * 1024):
+        raise RuntimeError(f'Super-resolution model download failed for x{scale}.')
+
+    return model_path
+
+
+def ensure_superres_models() -> dict:
+    ready = {}
+    for scale in (2, 4):
+        path = _ensure_superres_model_file(scale)
+        ready[f'x{scale}'] = str(path)
+    return ready
+
+
+def superres_backend_name() -> str:
+    return 'opencv.dnn_superres' if hasattr(cv2, 'dnn_superres') else 'opencv.dnn.tensorflow'
+
+
+def _create_superres_engine(scale: int):
+    spec = SUPERRES_MODEL_SPECS.get(scale)
+    if not spec:
+        raise ValueError(f'Unsupported super-resolution scale x{scale}.')
+
+    model_path = _ensure_superres_model_file(scale)
+
+    if hasattr(cv2, 'dnn_superres'):
+        engine = cv2.dnn_superres.DnnSuperResImpl_create()
+        engine.readModel(str(model_path))
+        engine.setModel(spec['name'], scale)
+        return {
+            'backend': 'opencv.dnn_superres',
+            'model_path': model_path,
+            'engine': engine,
+            'scale': scale,
+        }
+
+    net = cv2.dnn.readNetFromTensorflow(str(model_path))
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    return {
+        'backend': 'opencv.dnn.tensorflow',
+        'model_path': model_path,
+        'engine': net,
+        'scale': scale,
+    }
+
+
+def _apply_superres_pass(image_bgr: np.ndarray, engine_info: dict) -> np.ndarray:
+    backend = engine_info['backend']
+    engine = engine_info['engine']
+
+    if backend == 'opencv.dnn_superres':
+        return engine.upsample(image_bgr)
+
+    if backend == 'opencv.dnn.tensorflow':
+        blob = cv2.dnn.blobFromImage(
+            image_bgr,
+            scalefactor=1.0 / 255.0,
+            size=(image_bgr.shape[1], image_bgr.shape[0]),
+            mean=(0.0, 0.0, 0.0),
+            swapRB=True,
+            crop=False,
+        )
+        engine.setInput(blob)
+        output = engine.forward()
+        output = np.squeeze(output, axis=0)
+        output = np.transpose(output, (1, 2, 0))
+        output = np.clip(output, 0.0, 1.0)
+        output_rgb = (output * 255.0).astype(np.uint8)
+        return cv2.cvtColor(output_rgb, cv2.COLOR_RGB2BGR)
+
+    raise RuntimeError(f"Unsupported super-resolution backend: {backend}")
+
+
+def _validate_superres_budget(width: int, height: int, scale: int) -> None:
+    output_pixels = int(width) * int(height) * int(scale) * int(scale)
+    if output_pixels > SUPERRES_MAX_OUTPUT_PIXELS:
+        max_megapixels = round(SUPERRES_MAX_OUTPUT_PIXELS / 1_000_000, 1)
+        raise ValueError(
+            f'Requested x{scale} output is too large for this server budget. '
+            f'Choose a lower scale or smaller image (limit ~{max_megapixels}MP).'
+        )
+
+
+def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strength: float, sharpness_strength: float, fidelity_strength: float) -> tuple[np.ndarray, dict]:
+    if target_scale not in SUPERRES_ALLOWED_SCALES:
+        raise ValueError('Supported super-resolution scales are x2, x4, and x16.')
+
+    h, w = image_bgr.shape[:2]
+    _validate_superres_budget(w, h, target_scale)
+
+    pass_scales = [2] if target_scale == 2 else [4] if target_scale == 4 else [4, 4]
+
+    denoise_mix = _clamp((denoise_strength / 100.0) * (1.15 - (fidelity_strength / 140.0)), 0.0, 1.0)
+    sharpen_mix = _clamp((sharpness_strength / 100.0) * (0.45 + (fidelity_strength / 200.0)), 0.0, 1.0)
+
+    current = image_bgr
+    model_files = []
+    backend_name = ''
+    for pass_scale in pass_scales:
+        engine_info = _create_superres_engine(pass_scale)
+        model_files.append(engine_info['model_path'].name)
+        backend_name = engine_info['backend']
+        current = _apply_superres_pass(current, engine_info)
+
+        if denoise_mix > 0.25:
+            sigma_color = 14 + (34 * denoise_mix)
+            current = cv2.bilateralFilter(current, d=0, sigmaColor=sigma_color, sigmaSpace=4)
+
+    if sharpen_mix > 0.12:
+        blur = cv2.GaussianBlur(current, (0, 0), sigmaX=1.05)
+        amount = 0.10 + (0.24 * sharpen_mix)
+        current = cv2.addWeighted(current, 1.0 + amount, blur, -amount, 0)
+
+    current = np.clip(current, 0, 255).astype(np.uint8)
+    out_h, out_w = current.shape[:2]
+
+    return current, {
+        'method': 'EDSR',
+        'scale': target_scale,
+        'backend': backend_name or superres_backend_name(),
+        'passes': len(pass_scales),
+        'output_width': int(out_w),
+        'output_height': int(out_h),
+        'models': model_files,
+    }
+
+
+def _enhance_pipeline(image_bgr: np.ndarray, settings: dict | None = None, progress_callback=None) -> tuple[Image.Image, dict, dict]:
     if image_bgr is None or image_bgr.size == 0:
         raise ValueError('Input image is empty')
 
@@ -148,43 +310,23 @@ def _enhance_pipeline(image_bgr: np.ndarray, settings: dict | None = None, progr
     _emit(progress_callback, 'color', 'done')
 
     _emit(progress_callback, 'upscale', 'running')
-    enhanced_rgb = np.array(final.convert('RGB'))
-    h, w = enhanced_rgb.shape[:2]
-    upscale_factor = _resolve_upscale_factor(w, h, s['upscale'])
-
-    if upscale_factor > 1.0:
-        interpolation = cv2.INTER_LANCZOS4 if upscale_factor >= 1.6 else cv2.INTER_CUBIC
-        upscaled = cv2.resize(
-            enhanced_rgb,
-            dsize=None,
-            fx=upscale_factor,
-            fy=upscale_factor,
-            interpolation=interpolation,
-        )
-
-        detail = cv2.detailEnhance(
-            upscaled,
-            sigma_s=10,
-            sigma_r=0.12 + (s['contrast'] * 0.0015),
-        )
-        detail_strength = 0.08 + (s['sharpness'] * 0.003)
-        upscaled = cv2.addWeighted(upscaled, 1.0 - detail_strength, detail, detail_strength, 0)
-
-        if s['denoise'] > 40:
-            upscaled = cv2.fastNlMeansDenoisingColored(upscaled, None, 3, 3, 5, 11)
-
-        upscaled_pil = Image.fromarray(upscaled)
-        final = upscaled_pil.filter(
-            ImageFilter.UnsharpMask(radius=2.2, percent=int(130 + (s['sharpness'] * 0.8)), threshold=2)
-        )
+    enhanced_bgr = cv2.cvtColor(np.array(final.convert('RGB')), cv2.COLOR_RGB2BGR)
+    upscaled_bgr, upscale_meta = _super_resolve_bgr(
+        enhanced_bgr,
+        target_scale=int(s['upscale_scale']),
+        denoise_strength=s['denoise'],
+        sharpness_strength=s['sharpness'],
+        fidelity_strength=s['upscale'],
+    )
+    final = Image.fromarray(cv2.cvtColor(upscaled_bgr, cv2.COLOR_BGR2RGB))
 
     _emit(progress_callback, 'upscale', 'done')
 
-    return final, s
+    return final, s, upscale_meta
 
 
 def enhance_image(image_bgr: np.ndarray, settings: dict | None = None) -> np.ndarray:
-    final_pil, _ = _enhance_pipeline(image_bgr, settings=settings, progress_callback=None)
+    final_pil, _, _ = _enhance_pipeline(image_bgr, settings=settings, progress_callback=None)
     return cv2.cvtColor(np.array(final_pil), cv2.COLOR_RGB2BGR)
 
 
@@ -211,7 +353,7 @@ def generate_comparison(original_path: str, enhanced_img: Image.Image) -> Image.
     return comparison
 
 
-def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, settings: dict | None = None) -> dict:
+def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, settings: dict | None = None, upscale_meta: dict | None = None) -> dict:
     s = _normalize_settings(settings)
 
     orig = np.array(Image.open(original_path).convert('L'), dtype=np.float32)
@@ -236,12 +378,17 @@ def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, s
 
     resolution_gain = int(max(0, ((enhanced_img.width * enhanced_img.height) / max(1, orig.shape[1] * orig.shape[0]) - 1) * 100))
 
+    resolved_scale = int((upscale_meta or {}).get('scale', s.get('upscale_scale', 4)))
+    resolved_method = str((upscale_meta or {}).get('method', 'EDSR'))
+
     return {
         'brightness_increase': f'+{brightness_delta}',
         'contrast_improvement': f'+{contrast_delta}%',
         'noise_reduction': f'-{noise_reduction}%',
         'sharpness_boost': f'+{sharpness_boost}%',
         'resolution_gain': f'+{resolution_gain}%',
+        'super_resolution': f'{resolved_method} x{resolved_scale}',
+        'output_resolution': f'{enhanced_img.width} x {enhanced_img.height}',
     }
 
 
@@ -250,17 +397,23 @@ def enhance_night_image(image_path: str, settings: dict | None = None, progress_
     if image_bgr is None:
         raise ValueError(f'Could not read image from path: {image_path}')
 
-    enhanced_pil, normalized_settings = _enhance_pipeline(
+    enhanced_pil, normalized_settings, upscale_meta = _enhance_pipeline(
         image_bgr,
         settings=settings,
         progress_callback=progress_callback,
     )
 
     comparison_img = generate_comparison(image_path, enhanced_pil)
-    stats = calculate_enhancement_stats(image_path, enhanced_pil, settings=normalized_settings)
+    stats = calculate_enhancement_stats(
+        image_path,
+        enhanced_pil,
+        settings=normalized_settings,
+        upscale_meta=upscale_meta,
+    )
 
     return {
         'enhanced_image': enhanced_pil,
         'comparison_image': comparison_img,
         'stats': stats,
+        'upscale_meta': upscale_meta,
     }

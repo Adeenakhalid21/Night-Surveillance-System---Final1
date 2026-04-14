@@ -134,6 +134,16 @@
               <output id="upscaleValue">70</output>
               <input type="range" min="0" max="100" value="70" id="upscaleSlider">
             </label>
+
+            <label class="select-row" for="upscaleScaleSelect">
+              <span>Super-Resolution Scale</span>
+              <select id="upscaleScaleSelect">
+                <option value="2">2x (EDSR)</option>
+                <option value="4" selected>4x (EDSR)</option>
+                <option value="16">16x (EDSR x4 + x4)</option>
+              </select>
+              <small>Deep model-based upscaling. Not interpolation-only resizing.</small>
+            </label>
           </div>
 
           <button class="primary-action" id="enhanceBtn" type="button">
@@ -173,7 +183,7 @@
               <li data-stage="gamma"><span class="stage-icon">[]</span> Stage 3: Gamma Correction...</li>
               <li data-stage="sharpen"><span class="stage-icon">[]</span> Stage 4: Sharpening...</li>
               <li data-stage="color"><span class="stage-icon">[]</span> Stage 5: Color Boost...</li>
-              <li data-stage="upscale"><span class="stage-icon">[]</span> Stage 6: Upscaling...</li>
+              <li data-stage="upscale"><span class="stage-icon">[]</span> Stage 6: Super-Resolution Upscaling...</li>
             </ul>
             <div class="job-status" id="jobStatus">Waiting for image...</div>
           </div>
@@ -198,6 +208,14 @@
             <article class="stat-card" data-stat="resolution_gain">
               <h4>Upscale</h4>
               <p class="stat-value" id="statResolution">+0%</p>
+            </article>
+            <article class="stat-card" data-stat="super_resolution">
+              <h4>SR Model</h4>
+              <p class="stat-value" id="statSuperResolution">EDSR x4</p>
+            </article>
+            <article class="stat-card" data-stat="output_resolution">
+              <h4>Output Size</h4>
+              <p class="stat-value" id="statOutputResolution">0 x 0</p>
             </article>
           </div>
 
