@@ -108,6 +108,27 @@ pip install torch==2.9.1+cpu -f https://download.pytorch.org/whl/torch_stable.ht
 python -m pip install --upgrade pip
 ```
 
+### Configure NUNIF waifu2x Backend (Recommended)
+The image enhancement pipeline now uses `nagadomi/nunif` for super-resolution.
+
+```powershell
+# Clone NUNIF once into the project (skip if it already exists)
+if (-not (Test-Path .\third_party\nunif)) {
+  git clone https://github.com/nagadomi/nunif.git .\third_party\nunif
+}
+
+# Optional tuning: choose photo/art/art_scan model profile
+$env:NUNIF_MODEL_TYPE = "photo"
+
+# Force app to use NUNIF backend
+$env:SUPERRES_ENGINE = "nunif"
+
+# Verify backend and trigger model download/cache
+python -c "import enhancement; print('backend:', enhancement.superres_backend_name()); print('models:', enhancement.ensure_superres_models())"
+```
+
+The default `pip install -r requirements.txt` setup includes the runtime dependencies required by the NUNIF hub loader.
+
 ---
 
 ## ▶️ Running the Application

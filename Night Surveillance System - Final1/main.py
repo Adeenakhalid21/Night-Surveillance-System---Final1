@@ -8,7 +8,12 @@ import json
 from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
-from enhancement import enhance_image, enhance_night_image, enhancement_stage_keys
+from enhancement import (
+    analyze_lowlight_improvement,
+    enhance_image_with_meta,
+    enhance_night_image,
+    enhancement_stage_keys,
+)
 import random
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -19,6 +24,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import uuid
+import webbrowser
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.utils import secure_filename
 
@@ -321,6 +327,7 @@ def _restore_session_from_remember_cookie() -> bool:
         session['loggedin'] = True
         session['sno'] = user['sno']
         session['firstname'] = user['firstname']
+        session['lastname'] = user['lastname']
         session['email'] = user['email']
         session.permanent = True
         return True
@@ -2240,6 +2247,7 @@ def login():
                     session['loggedin'] = True
                     session['sno'] = user['sno']
                     session['firstname'] = user['firstname']
+                    session['lastname'] = user['lastname']
                     session['email'] = user['email']
                     session.permanent = remember_me
                     mesage = 'Logged in successfully!'
@@ -2330,8 +2338,13 @@ def lowlight_detection():
                 'upscale_scale': '2',
             }
 
+            lowlight_analysis = {}
+            upscale_meta = {}
             try:
-                enhanced_img = enhance_image(img_for_processing, settings=enhancement_settings)
+                enhanced_img, _, upscale_meta = enhance_image_with_meta(
+                    img_for_processing,
+                    settings=enhancement_settings,
+                )
             except Exception as e:
                 print(f"Enhancement failed: {e}")
                 # Fast fallback pipeline when the enhancement model stack is unavailable.
@@ -2339,6 +2352,26 @@ def lowlight_detection():
                 y, cr, cb = cv2.split(ycrcb)
                 y = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(y)
                 enhanced_img = cv2.cvtColor(cv2.merge((y, cr, cb)), cv2.COLOR_YCrCb2BGR)
+                fallback_h, fallback_w = enhanced_img.shape[:2]
+                upscale_meta = {
+                    'method': 'CLAHE Fallback',
+                    'scale': 1,
+                    'backend': 'opencv.clahe',
+                    'device': 'cpu',
+                    'passes': 1,
+                    'output_width': int(fallback_w),
+                    'output_height': int(fallback_h),
+                    'models': [],
+                    'model_names': [],
+                    'fallback_used': True,
+                    'fallback_reason': str(e),
+                }
+
+            try:
+                lowlight_analysis = analyze_lowlight_improvement(img_for_processing, enhanced_img)
+            except Exception as analysis_error:
+                print(f"Low-light analysis failed: {analysis_error}")
+                lowlight_analysis = {}
 
             if get_model() is None:
                 return jsonify({'error': 'Model not loaded'}), 500
@@ -2350,6 +2383,10 @@ def lowlight_detection():
                 apply_side_effects=False,
             )
             annotated, anomalies = detect_anomalies(annotated, detections=detections)
+
+            enhanced_filename = f"enhanced_{timestamp}.jpg"
+            enhanced_path = os.path.join(app.config['LOWLIGHT_FOLDER'], enhanced_filename)
+            cv2.imwrite(enhanced_path, enhanced_img)
 
             result_filename = f"result_{timestamp}.jpg"
             result_path = os.path.join(app.config['LOWLIGHT_FOLDER'], result_filename)
@@ -2381,8 +2418,13 @@ def lowlight_detection():
                     'enhancement': 'low_light_enhancement_plus_detection',
                     'anomaly_detected': bool(anomalies),
                     'top_anomaly': top_anomaly,
+                    'superres_method': upscale_meta.get('method', 'unknown'),
+                    'superres_backend': upscale_meta.get('backend', 'unknown'),
                 },
+                'upscale_meta': upscale_meta,
+                'lowlight_analysis': lowlight_analysis,
                 'result_image': f"/static/lowlight_uploads/{result_filename}",
+                'enhanced_image': f"/static/lowlight_uploads/{enhanced_filename}",
                 'original_image': f"/static/lowlight_uploads/{filename}",
             })
         else:
@@ -2453,31 +2495,139 @@ def image_enhancement_progress(job_id):
             return jsonify({'error': 'Enhancement job not found'}), 404
         return jsonify(job)
 
+
+def _value_from_row(row, key: str, index: int = 0):
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row[index]
+        except Exception:
+            return None
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    try:
+        if USE_PG:
+            row = conn.execute(
+                'SELECT to_regclass(?) AS table_name',
+                (f'public.{table_name}',),
+            ).fetchone()
+            return bool(_value_from_row(row, 'table_name'))
+
+        row = conn.execute(
+            'SELECT name FROM sqlite_master WHERE type = ? AND name = ?',
+            ('table', table_name),
+        ).fetchone()
+        return row is not None
+    except Exception as exc:
+        print(f"[DASHBOARD] Failed table existence check for {table_name}: {exc}")
+        return False
+
+
+def _safe_table_count(conn, table_name: str) -> int:
+    if not _table_exists(conn, table_name):
+        return 0
+    try:
+        row = conn.execute(f'SELECT COUNT(*) AS total FROM {table_name}').fetchone()
+        value = _value_from_row(row, 'total', 0)
+        return int(value or 0)
+    except Exception as exc:
+        print(f"[DASHBOARD] Failed to count rows in {table_name}: {exc}")
+        return 0
+
+
+def _collect_dashboard_stats() -> dict:
+    stats = {
+        'cam_count': 0,
+        'dataset_count': 0,
+        'detections_count': 0,
+        'events_count': 0,
+    }
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        stats['cam_count'] = _safe_table_count(conn, 'cam')
+        stats['dataset_count'] = _safe_table_count(conn, 'datasets')
+        stats['detections_count'] = _safe_table_count(conn, 'detection_results')
+        stats['events_count'] = _safe_table_count(conn, 'surveillance_events')
+    except Exception as exc:
+        print(f"[DASHBOARD] Failed to collect stats: {exc}")
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+    return stats
+
+
+def _resolve_dashboard_identity() -> dict:
+    first_name = str(session.get('firstname', '') or '').strip()
+    last_name = str(session.get('lastname', '') or '').strip()
+    email = str(session.get('email', '') or '').strip()
+
+    # Backfill missing session names for older sessions created before lastname was stored.
+    if email and (not first_name or not last_name):
+        conn = None
+        try:
+            conn = get_db_connection()
+            row = conn.execute(
+                'SELECT firstname, lastname FROM user WHERE LOWER(email) = ?',
+                (email.lower(),),
+            ).fetchone()
+            if row:
+                first_name = str(_value_from_row(row, 'firstname') or first_name).strip()
+                last_name = str(_value_from_row(row, 'lastname') or last_name).strip()
+                if first_name:
+                    session['firstname'] = first_name
+                if last_name:
+                    session['lastname'] = last_name
+        except Exception as exc:
+            print(f"[DASHBOARD] Failed to resolve profile name: {exc}")
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    display_name = ' '.join(part for part in (first_name, last_name) if part).strip()
+    if not display_name and first_name:
+        display_name = first_name
+    if not display_name and email:
+        display_name = email.split('@', 1)[0]
+    if not display_name:
+        display_name = 'User'
+
+    return {
+        'display_name': display_name,
+        'profile_role': 'Admin',
+    }
+
 @app.route('/dashboard')
 def dashboard():
     if 'loggedin' not in session:
         return redirect(url_for('index'))
-    cam_count = dataset_count = detections_count = events_count = 0
-    try:
-        conn = get_db_connection()
-        if USE_PG:
-            cam_count = conn.execute('SELECT COUNT(*) FROM cam').fetchone()[0]
-            dataset_count = conn.execute('SELECT COUNT(*) FROM datasets').fetchone()[0]
-            detections_count = conn.execute('SELECT COUNT(*) FROM detection_results').fetchone()[0]
-            events_count = conn.execute('SELECT COUNT(*) FROM surveillance_events').fetchone()[0]
-        else:
-            cam_count = conn.execute('SELECT COUNT(*) FROM cam').fetchone()[0]
-            dataset_count = conn.execute('SELECT COUNT(*) FROM datasets').fetchone()[0]
-            detections_count = conn.execute('SELECT COUNT(*) FROM detection_results').fetchone()[0]
-            events_count = conn.execute('SELECT COUNT(*) FROM surveillance_events').fetchone()[0]
-    except Exception:
-        pass
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    return render_template('dashboard.html', cam_count=cam_count, dataset_count=dataset_count, detections_count=detections_count, events_count=events_count)
+    stats = _collect_dashboard_stats()
+    identity = _resolve_dashboard_identity()
+    return render_template('dashboard.html', **stats, **identity)
+
+
+@app.route('/api/dashboard_stats')
+def dashboard_stats_api():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    payload = _collect_dashboard_stats()
+    payload['server_time'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    return jsonify(payload)
 
 @app.route('/addCamera')
 def addCamera():
@@ -2866,4 +3016,29 @@ def dataset_analytics():
                          recent_activity=recent_activity)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    host = (os.getenv('APP_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+    try:
+        port = int(float(os.getenv('APP_PORT', '5000')))
+    except Exception:
+        port = 5000
+
+    debug_enabled = str(os.getenv('FLASK_DEBUG', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+    auto_open_browser = str(os.getenv('AUTO_OPEN_BROWSER', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    # Flask debug mode uses a reloader process. Open browser only once in the active child process.
+    is_reloader_child = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+    should_open_browser = auto_open_browser and (not debug_enabled or is_reloader_child)
+
+    if should_open_browser:
+        browser_host = '127.0.0.1' if host in ('0.0.0.0', '::') else host
+        launch_url = f'http://{browser_host}:{port}/'
+
+        def _launch_browser() -> None:
+            try:
+                webbrowser.open_new_tab(launch_url)
+            except Exception as exc:
+                print(f"[APP] Browser auto-open skipped: {exc}")
+
+        threading.Timer(1.0, _launch_browser).start()
+
+    app.run(host=host, port=port, debug=debug_enabled)

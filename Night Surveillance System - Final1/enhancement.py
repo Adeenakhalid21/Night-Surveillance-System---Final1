@@ -1,11 +1,8 @@
 import os
-import shutil
-import math
 import sys
 import threading
 import types
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import cv2
 import numpy as np
@@ -26,13 +23,6 @@ try:
 except Exception:
     pass
 
-try:
-    from basicsr.archs.rrdbnet_arch import RRDBNet
-    from basicsr.archs.srvgg_arch import SRVGGNetCompact
-except Exception:  # pragma: no cover - runtime optional dependency
-    RRDBNet = None
-    SRVGGNetCompact = None
-
 
 ENHANCEMENT_STAGES = [
     {'key': 'denoise', 'label': 'Denoising'},
@@ -44,51 +34,37 @@ ENHANCEMENT_STAGES = [
 ]
 
 
-SUPERRES_MODEL_DIR = Path(__file__).resolve().parent / 'models' / 'superres'
-SUPERRES_MODEL_SPECS = {
-    2: {
-        'name': 'fsrcnn',
-        'filename': 'fsrcnn_x2.pb',
-        'url': 'https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x2.pb',
-        'min_size_bytes': 32 * 1024,
-    },
-    4: {
-        'name': 'fsrcnn',
-        'filename': 'fsrcnn_x4.pb',
-        'url': 'https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x4.pb',
-        'min_size_bytes': 32 * 1024,
-    },
-}
-REAL_ESRGAN_MODEL_SPECS = {
-    2: {
-        'name': 'RealESRGAN_x2plus',
-        'filename': 'RealESRGAN_x2plus.pth',
-        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth',
-        'arch': 'rrdbnet',
-        'scale': 2,
-    },
-    4: {
-        'name': 'realesr-general-x4v3',
-        'filename': 'realesr-general-x4v3.pth',
-        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth',
-        'arch': 'srvgg',
-        'scale': 4,
-    },
-}
 SUPERRES_ALLOWED_SCALES = (2, 4, 8, 16)
 SUPERRES_MAX_OUTPUT_PIXELS = int(float(os.getenv('SUPERRES_MAX_OUTPUT_PIXELS', '120000000')))
-SUPERRES_DOWNLOAD_TIMEOUT_SEC = int(float(os.getenv('SUPERRES_DOWNLOAD_TIMEOUT_SEC', '180')))
-SUPERRES_ENGINE = str(os.getenv('SUPERRES_ENGINE', 'auto')).strip().lower()
+SUPERRES_ENGINE = str(os.getenv('SUPERRES_ENGINE', 'nunif')).strip().lower()
 SUPERRES_TILE = max(0, int(float(os.getenv('SUPERRES_TILE', '256'))))
 SUPERRES_TILE_PAD = max(2, int(float(os.getenv('SUPERRES_TILE_PAD', '12'))))
 SUPERRES_PREPAD = max(0, int(float(os.getenv('SUPERRES_PREPAD', '0'))))
 SUPERRES_HALF = str(os.getenv('SUPERRES_HALF', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+NUNIF_REPO_URL = 'https://github.com/nagadomi/nunif'
+NUNIF_REPO_DIR = Path(__file__).resolve().parent / 'third_party' / 'nunif'
+NUNIF_REPO_REF = str(os.getenv('NUNIF_REPO_REF', 'master') or 'master').strip() or 'master'
+NUNIF_MODEL_TYPE = str(os.getenv('NUNIF_MODEL_TYPE', 'photo') or 'photo').strip().lower()
+if NUNIF_MODEL_TYPE == 'scan':
+    NUNIF_MODEL_TYPE = 'art_scan'
+if NUNIF_MODEL_TYPE not in ('art', 'art_scan', 'photo', 'swin_unet/art', 'swin_unet/art_scan', 'swin_unet/photo', 'cunet/art', 'upconv_7/art', 'upconv_7/photo'):
+    NUNIF_MODEL_TYPE = 'photo'
+
+NUNIF_NOISE_LEVEL = max(0, min(3, int(float(os.getenv('NUNIF_NOISE_LEVEL', '2')))))
+NUNIF_BATCH_SIZE = max(1, int(float(os.getenv('NUNIF_BATCH_SIZE', '1'))))
+NUNIF_TILE_SIZE = max(64, int(float(os.getenv('NUNIF_TILE_SIZE', str(max(256, SUPERRES_TILE))))))
+NUNIF_TTA = str(os.getenv('NUNIF_TTA', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+if not os.getenv('NUNIF_HOME'):
+    os.environ['NUNIF_HOME'] = str((Path(__file__).resolve().parent / 'models' / 'nunif_home').resolve())
 
 ENHANCEMENT_FAST_MODE = str(os.getenv('ENHANCEMENT_FAST_MODE', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
 ENHANCEMENT_FAST_PIXELS = max(640 * 480, int(float(os.getenv('ENHANCEMENT_FAST_PIXELS', str(1280 * 720)))))
 
 _SUPERRES_ENGINE_CACHE = {}
 _SUPERRES_ENGINE_LOCK = threading.Lock()
+_NUNIF_DIST_INFO_CACHE = None
 
 
 def enhancement_stage_keys() -> list[dict]:
@@ -123,6 +99,105 @@ def _normalize_settings(settings: dict | None) -> dict:
     return normalized
 
 
+def _lowlight_severity(score: int) -> str:
+    if score >= 75:
+        return 'severe'
+    if score >= 58:
+        return 'moderate'
+    if score >= 45:
+        return 'mild'
+    return 'normal'
+
+
+def _lowlight_recommendation(severity: str) -> str:
+    if severity == 'severe':
+        return 'Strong enhancement suggested: high denoise, high contrast, and NUNIF waifu2x x4 or above.'
+    if severity == 'moderate':
+        return 'Enhancement recommended: moderate denoise plus NUNIF waifu2x x2 to x4.'
+    if severity == 'mild':
+        return 'Light enhancement is enough: mild denoise and detail-preserving upscale.'
+    return 'Lighting is acceptable. Enhancement is optional unless detection quality drops.'
+
+
+def analyze_lowlight_image(image_bgr: np.ndarray) -> dict:
+    if image_bgr is None or image_bgr.size == 0:
+        raise ValueError('Input image is empty')
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    mean_luminance = float(np.mean(gray))
+    contrast_std = float(np.std(gray))
+    p10 = float(np.percentile(gray, 10))
+    p90 = float(np.percentile(gray, 90))
+    dynamic_range = max(0.0, p90 - p10)
+    shadow_ratio = float(np.mean(gray <= 45.0) * 100.0)
+    highlight_ratio = float(np.mean(gray >= 210.0) * 100.0)
+
+    residual = cv2.subtract(gray, cv2.GaussianBlur(gray, (0, 0), 1.1))
+    noise_proxy = float(np.std(residual))
+
+    mean_darkness = 1.0 - (mean_luminance / 255.0)
+    shadow_component = min(1.0, shadow_ratio / 70.0)
+    contrast_component = max(0.0, (40.0 - contrast_std) / 40.0)
+
+    low_light_score = int(round(100.0 * (
+        (0.55 * mean_darkness)
+        + (0.30 * shadow_component)
+        + (0.15 * contrast_component)
+    )))
+    low_light_score = int(_clamp(low_light_score, 0, 100))
+    severity = _lowlight_severity(low_light_score)
+
+    return {
+        'is_low_light': severity != 'normal',
+        'low_light_score': low_light_score,
+        'severity': severity,
+        'recommendation': _lowlight_recommendation(severity),
+        'metrics': {
+            'mean_luminance': round(mean_luminance, 2),
+            'contrast_std': round(contrast_std, 2),
+            'dynamic_range': round(dynamic_range, 2),
+            'shadow_ratio_percent': round(shadow_ratio, 2),
+            'highlight_ratio_percent': round(highlight_ratio, 2),
+            'noise_proxy': round(noise_proxy, 2),
+        },
+    }
+
+
+def analyze_lowlight_improvement(original_bgr: np.ndarray, enhanced_bgr: np.ndarray) -> dict:
+    before = analyze_lowlight_image(original_bgr)
+    after = analyze_lowlight_image(enhanced_bgr)
+
+    before_metrics = before.get('metrics', {})
+    after_metrics = after.get('metrics', {})
+
+    score_reduction = int(max(0, before.get('low_light_score', 0) - after.get('low_light_score', 0)))
+    brightness_gain = round(float(after_metrics.get('mean_luminance', 0.0)) - float(before_metrics.get('mean_luminance', 0.0)), 2)
+    contrast_gain = round(float(after_metrics.get('contrast_std', 0.0)) - float(before_metrics.get('contrast_std', 0.0)), 2)
+    shadow_reduction = round(float(before_metrics.get('shadow_ratio_percent', 0.0)) - float(after_metrics.get('shadow_ratio_percent', 0.0)), 2)
+
+    if score_reduction >= 25:
+        quality = 'strong'
+    elif score_reduction >= 12:
+        quality = 'moderate'
+    elif score_reduction >= 5:
+        quality = 'small'
+    else:
+        quality = 'minimal'
+
+    return {
+        'before': before,
+        'after': after,
+        'improvement': {
+            'score_reduction': score_reduction,
+            'brightness_gain': brightness_gain,
+            'contrast_gain': contrast_gain,
+            'shadow_reduction_percent': shadow_reduction,
+            'quality': quality,
+            'improved': bool(score_reduction >= 5 or brightness_gain >= 8.0),
+        },
+    }
+
+
 def _emit(progress_callback, stage_key: str, stage_status: str) -> None:
     if progress_callback is None:
         return
@@ -148,25 +223,6 @@ def _resolve_upscale_scale(scale_value) -> int:
     return scale if scale in SUPERRES_ALLOWED_SCALES else 4
 
 
-def _download_model(url: str, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = destination.with_suffix(destination.suffix + '.part')
-
-    request = Request(url, headers={'User-Agent': 'NightWatch-SuperRes/1.0'})
-    with urlopen(request, timeout=SUPERRES_DOWNLOAD_TIMEOUT_SEC) as response, temp_path.open('wb') as output_file:
-        shutil.copyfileobj(response, output_file)
-
-    temp_path.replace(destination)
-
-
-def _realesrgan_available() -> bool:
-    return (
-        torch is not None
-        and RRDBNet is not None
-        and SRVGGNetCompact is not None
-    )
-
-
 def _torch_device_name() -> str:
     if torch is None:
         return 'cpu'
@@ -180,13 +236,87 @@ def _torch_device_name() -> str:
     return 'cpu'
 
 
+def _nunif_available() -> bool:
+    return torch is not None
+
+
+def _resolve_nunif_repo_dir() -> Path:
+    custom_repo = str(os.getenv('NUNIF_REPO_DIR', '') or '').strip()
+    if custom_repo:
+        return Path(custom_repo).expanduser().resolve()
+    return NUNIF_REPO_DIR
+
+
+def _read_git_head_short(repo_dir: Path) -> str:
+    git_dir = repo_dir / '.git'
+    if git_dir.is_file():
+        try:
+            marker = git_dir.read_text(encoding='utf-8', errors='ignore').strip()
+            if marker.startswith('gitdir:'):
+                rel = marker.split(':', 1)[1].strip()
+                candidate = (repo_dir / rel).resolve()
+                if candidate.exists():
+                    git_dir = candidate
+        except Exception:
+            return ''
+    if not git_dir.exists():
+        return ''
+
+    head_file = git_dir / 'HEAD'
+    if not head_file.exists():
+        return ''
+    try:
+        head_value = head_file.read_text(encoding='utf-8', errors='ignore').strip()
+        if head_value.startswith('ref:'):
+            ref_name = head_value.split(':', 1)[1].strip()
+            ref_file = git_dir / ref_name
+            if ref_file.exists():
+                head_value = ref_file.read_text(encoding='utf-8', errors='ignore').strip()
+            else:
+                packed_refs = git_dir / 'packed-refs'
+                if packed_refs.exists():
+                    for line in packed_refs.read_text(encoding='utf-8', errors='ignore').splitlines():
+                        line = line.strip()
+                        if not line or line.startswith('#') or line.startswith('^'):
+                            continue
+                        try:
+                            commit, ref = line.split(' ', 1)
+                        except ValueError:
+                            continue
+                        if ref.strip() == ref_name:
+                            head_value = commit.strip()
+                            break
+        return head_value[:12] if len(head_value) >= 7 else ''
+    except Exception:
+        return ''
+
+
+def _nunif_distribution_info() -> dict:
+    global _NUNIF_DIST_INFO_CACHE
+    if _NUNIF_DIST_INFO_CACHE is not None:
+        return dict(_NUNIF_DIST_INFO_CACHE)
+
+    repo_dir = _resolve_nunif_repo_dir()
+    source = NUNIF_REPO_URL
+    if repo_dir.exists():
+        source = str(repo_dir)
+
+    info = {
+        'package': 'nunif-waifu2x',
+        'version': 'master',
+        'source': source,
+        'commit': _read_git_head_short(repo_dir),
+    }
+
+    _NUNIF_DIST_INFO_CACHE = info
+    return dict(info)
+
+
 def _backend_priority() -> list[str]:
-    if SUPERRES_ENGINE in ('realesrgan', 'esrgan'):
-        return ['realesrgan', 'opencv.dnn_superres']
-    if SUPERRES_ENGINE in ('opencv', 'opencv.dnn_superres', 'edsr', 'fsrcnn'):
-        return ['opencv.dnn_superres', 'realesrgan']
-    # Auto mode: prioritize Real-ESRGAN when GPU is available; otherwise use fast CPU SR first.
-    return ['realesrgan', 'opencv.dnn_superres'] if _torch_device_name() == 'cuda' else ['opencv.dnn_superres', 'realesrgan']
+    if SUPERRES_ENGINE in ('nunif', 'nunif.waifu2x', 'waifu2x', 'nagadomi.nunif'):
+        return ['nunif.waifu2x']
+    # Keep runtime deterministic even if old env values are still present.
+    return ['nunif.waifu2x']
 
 
 def _decompose_scale(target_scale: int) -> list[int]:
@@ -201,258 +331,132 @@ def _decompose_scale(target_scale: int) -> list[int]:
     raise ValueError(f'Unsupported upscale factor x{target_scale}.')
 
 
-def _ensure_superres_model_file(scale: int) -> Path:
-    spec = SUPERRES_MODEL_SPECS.get(scale)
-    if not spec:
-        raise ValueError(f'No super-resolution model configured for x{scale}.')
-
-    min_size_bytes = int(spec.get('min_size_bytes', 1024 * 1024))
-    model_path = SUPERRES_MODEL_DIR / spec['filename']
-    if model_path.exists() and model_path.stat().st_size > min_size_bytes:
-        return model_path
-
-    _download_model(spec['url'], model_path)
-    if not model_path.exists() or model_path.stat().st_size <= min_size_bytes:
-        raise RuntimeError(f'Super-resolution model download failed for x{scale}.')
-
-    return model_path
-
-
-def _ensure_realesrgan_model_file(scale: int) -> Path:
-    spec = REAL_ESRGAN_MODEL_SPECS.get(scale)
-    if not spec:
-        raise ValueError(f'No Real-ESRGAN model configured for x{scale}.')
-
-    model_path = SUPERRES_MODEL_DIR / spec['filename']
-    if model_path.exists() and model_path.stat().st_size > (1024 * 1024):
-        return model_path
-
-    _download_model(spec['url'], model_path)
-    if not model_path.exists() or model_path.stat().st_size <= (1024 * 1024):
-        raise RuntimeError(f'Real-ESRGAN model download failed for x{scale}.')
-
-    return model_path
-
-
 def ensure_superres_models() -> dict:
     ready = {}
+    if not _nunif_available():
+        ready['nunif_error'] = 'torch/torchvision not available'
+        return ready
+
     for scale in (2, 4):
         try:
-            path = _ensure_superres_model_file(scale)
-            ready[f'opencv_x{scale}'] = str(path)
-        except Exception:
-            pass
-
-        if _realesrgan_available():
-            try:
-                path = _ensure_realesrgan_model_file(scale)
-                ready[f'realesrgan_x{scale}'] = str(path)
-            except Exception:
-                pass
+            info = _create_superres_engine(scale)
+            ready[f'nunif_x{scale}'] = f"{info.get('model_name', 'waifu2x')}:{info.get('method_name', '')}".rstrip(':')
+        except Exception as exc:
+            ready[f'nunif_x{scale}_error'] = str(exc)
 
     return ready
 
 
 def superres_backend_name() -> str:
-    for backend in _backend_priority():
-        if backend == 'realesrgan' and _realesrgan_available():
-            return 'realesrgan'
-        if backend == 'opencv.dnn_superres' and hasattr(cv2, 'dnn_superres'):
-            return 'opencv.dnn_superres'
+    if _nunif_available():
+        return 'nunif.waifu2x'
     return 'opencv.resize'
 
 
-def _build_realesrgan_model(spec: dict):
-    scale = int(spec.get('scale', 4))
-    arch = str(spec.get('arch', 'srvgg')).lower()
-
-    if arch == 'rrdbnet':
-        return RRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=23,
-            num_grow_ch=32,
-            scale=scale,
-        )
-
-    if arch == 'srvgg':
-        return SRVGGNetCompact(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_conv=32,
-            upscale=scale,
-            act_type='prelu',
-        )
-
-    raise ValueError(f"Unsupported Real-ESRGAN architecture: {arch}")
-
-
-class _TorchRealESRGANEngine:
-    def __init__(self, model, scale: int, device_name: str, use_half: bool, tile: int, tile_pad: int) -> None:
+class _NunifWaifu2xEngine:
+    def __init__(self, model, scale: int, device_name: str, model_type: str, noise_level: int, tta: bool = False) -> None:
+        self.model = model
         self.scale = int(scale)
-        self.device_name = device_name
-        self.device = torch.device(device_name)
-        self.tile = int(max(0, tile))
-        self.tile_pad = int(max(0, tile_pad))
-        self.use_half = bool(use_half and self.device_name == 'cuda')
-
-        self.model = model.to(self.device)
-        self.model.eval()
-        if self.use_half:
-            self.model = self.model.half()
-
-    def _forward_tensor(self, input_tensor):
-        if self.tile <= 0:
-            return self.model(input_tensor)
-
-        _, _, h, w = input_tensor.size()
-        tile = int(self.tile)
-        tile_pad = int(self.tile_pad)
-        out_h = h * self.scale
-        out_w = w * self.scale
-
-        output = torch.zeros((1, 3, out_h, out_w), device=self.device, dtype=input_tensor.dtype)
-        weight = torch.zeros_like(output)
-
-        tiles_x = math.ceil(w / tile)
-        tiles_y = math.ceil(h / tile)
-
-        for y in range(tiles_y):
-            for x in range(tiles_x):
-                x0 = x * tile
-                x1 = min(x0 + tile, w)
-                y0 = y * tile
-                y1 = min(y0 + tile, h)
-
-                x0_pad = max(x0 - tile_pad, 0)
-                x1_pad = min(x1 + tile_pad, w)
-                y0_pad = max(y0 - tile_pad, 0)
-                y1_pad = min(y1 + tile_pad, h)
-
-                input_tile = input_tensor[:, :, y0_pad:y1_pad, x0_pad:x1_pad]
-                output_tile = self.model(input_tile)
-
-                out_x0 = x0 * self.scale
-                out_x1 = x1 * self.scale
-                out_y0 = y0 * self.scale
-                out_y1 = y1 * self.scale
-
-                crop_x0 = (x0 - x0_pad) * self.scale
-                crop_x1 = crop_x0 + ((x1 - x0) * self.scale)
-                crop_y0 = (y0 - y0_pad) * self.scale
-                crop_y1 = crop_y0 + ((y1 - y0) * self.scale)
-
-                output[:, :, out_y0:out_y1, out_x0:out_x1] += output_tile[:, :, crop_y0:crop_y1, crop_x0:crop_x1]
-                weight[:, :, out_y0:out_y1, out_x0:out_x1] += 1
-
-        return output / torch.clamp(weight, min=1.0)
+        self.device_name = str(device_name)
+        self.model_type = str(model_type)
+        self.noise_level = int(noise_level)
+        self.tta = bool(tta)
+        self._lock = threading.RLock()
 
     def upsample(self, image_bgr: np.ndarray) -> np.ndarray:
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        tensor = torch.from_numpy(np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))).unsqueeze(0).to(self.device)
-        if self.use_half:
-            tensor = tensor.half()
+        pil_input = Image.fromarray(rgb)
 
-        with torch.inference_mode():
-            out_tensor = self._forward_tensor(tensor)
+        with self._lock:
+            pil_output = self.model.infer(pil_input, tta=self.tta, output_type='pil')
 
-        out = out_tensor.squeeze(0).permute(1, 2, 0).float().cpu().clamp(0.0, 1.0).numpy()
-        out = (out * 255.0).round().astype(np.uint8)
-        return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+        out_rgb = np.array(pil_output.convert('RGB'))
+        return cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+
+
+def _create_nunif_engine(scale: int) -> dict:
+    if not _nunif_available():
+        raise RuntimeError('NUNIF backend unavailable. Install torch and torchvision first.')
+
+    if scale not in (2, 4):
+        raise ValueError(f'NUNIF backend supports x2 and x4 passes only, got x{scale}.')
+
+    method = 'scale' if scale == 2 else 'scale4x'
+    device_name = _torch_device_name()
+    use_amp = bool(SUPERRES_HALF and device_name == 'cuda')
+    device_ids = [0] if device_name == 'cuda' else [-1]
+
+    repo_dir = _resolve_nunif_repo_dir()
+    if repo_dir.exists() and (repo_dir / 'hubconf.py').exists():
+        hub_source = 'local'
+        hub_target = str(repo_dir)
+        package_source = str(repo_dir)
+    else:
+        hub_source = 'github'
+        hub_target = f'nagadomi/nunif:{NUNIF_REPO_REF}'
+        package_source = NUNIF_REPO_URL
+
+    model = torch.hub.load(
+        hub_target,
+        'waifu2x',
+        source=hub_source,
+        trust_repo=True,
+        model_type=NUNIF_MODEL_TYPE,
+        method=method,
+        noise_level=NUNIF_NOISE_LEVEL,
+        device_ids=device_ids,
+        tile_size=NUNIF_TILE_SIZE,
+        batch_size=NUNIF_BATCH_SIZE,
+        keep_alpha=False,
+        amp=use_amp,
+    )
+
+    try:
+        model = model.to(device_name)
+    except Exception:
+        model = model.to('cpu')
+        device_name = 'cpu'
+
+    dist_info = _nunif_distribution_info()
+    model_file = (repo_dir / 'hubconf.py') if (repo_dir / 'hubconf.py').exists() else Path('nunif_hubconf.py')
+
+    engine = _NunifWaifu2xEngine(
+        model=model,
+        scale=scale,
+        device_name=device_name,
+        model_type=NUNIF_MODEL_TYPE,
+        noise_level=NUNIF_NOISE_LEVEL,
+        tta=NUNIF_TTA,
+    )
+
+    return {
+        'backend': 'nunif.waifu2x',
+        'model_path': model_file,
+        'engine': engine,
+        'scale': int(scale),
+        'device': device_name,
+        'model_name': f'waifu2x/{NUNIF_MODEL_TYPE}',
+        'method_name': method,
+        'package': dist_info.get('package', 'nunif-waifu2x'),
+        'package_version': dist_info.get('version', 'master'),
+        'package_source': package_source,
+        'package_commit': dist_info.get('commit', ''),
+    }
 
 
 def _engine_cache_key(backend: str, scale: int, device_name: str) -> str:
     return f"{backend}:x{int(scale)}:{device_name}:{SUPERRES_TILE}:{SUPERRES_TILE_PAD}:{SUPERRES_PREPAD}:{int(SUPERRES_HALF)}"
 
 
-def _create_realesrgan_engine(scale: int) -> dict:
-    if not _realesrgan_available():
-        raise RuntimeError(
-            'Real-ESRGAN backend unavailable. Install torch and basicsr for true SR upscaling.'
-        )
-
-    spec = REAL_ESRGAN_MODEL_SPECS.get(scale)
-    if not spec:
-        raise ValueError(f'No Real-ESRGAN model configured for x{scale}.')
-
-    model_path = _ensure_realesrgan_model_file(scale)
-    device_name = _torch_device_name()
-    model = _build_realesrgan_model(spec)
-
-    checkpoint = torch.load(str(model_path), map_location='cpu')
-    if isinstance(checkpoint, dict):
-        state_dict = checkpoint.get('params_ema') or checkpoint.get('params') or checkpoint.get('state_dict') or checkpoint
-    else:
-        state_dict = checkpoint
-
-    if not isinstance(state_dict, dict):
-        raise RuntimeError(f'Invalid Real-ESRGAN checkpoint format: {model_path.name}')
-
-    cleaned_state = {}
-    for key, value in state_dict.items():
-        new_key = key[7:] if str(key).startswith('module.') else key
-        cleaned_state[new_key] = value
-
-    model.load_state_dict(cleaned_state, strict=False)
-    engine = _TorchRealESRGANEngine(
-        model=model,
-        scale=int(spec['scale']),
-        device_name=device_name,
-        use_half=bool(SUPERRES_HALF),
-        tile=int(SUPERRES_TILE),
-        tile_pad=int(SUPERRES_TILE_PAD),
-    )
-    return {
-        'backend': 'realesrgan',
-        'model_path': model_path,
-        'engine': engine,
-        'scale': int(spec['scale']),
-        'device': device_name,
-        'model_name': spec.get('name', 'RealESRGAN'),
-    }
-
-
-def _create_opencv_superres_engine(scale: int) -> dict:
-    spec = SUPERRES_MODEL_SPECS.get(scale)
-    if not spec:
-        raise ValueError(f'Unsupported OpenCV super-resolution scale x{scale}.')
-
-    if not hasattr(cv2, 'dnn_superres'):
-        raise RuntimeError(
-            'OpenCV super-resolution backend is unavailable. '
-            'Install opencv-contrib-python to enable EDSR upscaling.'
-        )
-
-    model_path = _ensure_superres_model_file(scale)
-
-    engine = cv2.dnn_superres.DnnSuperResImpl_create()
-    engine.readModel(str(model_path))
-    engine.setModel(spec['name'], scale)
-    return {
-        'backend': 'opencv.dnn_superres',
-        'model_path': model_path,
-        'engine': engine,
-        'scale': scale,
-        'device': 'cpu',
-        'model_name': spec.get('name', 'EDSR'),
-    }
-
-
 def _create_superres_engine(scale: int) -> dict:
     errors = []
 
     for backend in _backend_priority():
-        if backend == 'realesrgan' and not _realesrgan_available():
-            errors.append('realesrgan: dependencies missing')
+        if backend == 'nunif.waifu2x' and not _nunif_available():
+            errors.append('nunif.waifu2x: dependencies missing')
             continue
 
-        if backend == 'opencv.dnn_superres' and not hasattr(cv2, 'dnn_superres'):
-            errors.append('opencv.dnn_superres: unavailable')
-            continue
-
-        device_name = _torch_device_name() if backend == 'realesrgan' else 'cpu'
+        device_name = _torch_device_name() if backend == 'nunif.waifu2x' else 'cpu'
         cache_key = _engine_cache_key(backend, scale, device_name)
 
         with _SUPERRES_ENGINE_LOCK:
@@ -461,10 +465,10 @@ def _create_superres_engine(scale: int) -> dict:
             return cached
 
         try:
-            if backend == 'realesrgan':
-                created = _create_realesrgan_engine(scale)
+            if backend == 'nunif.waifu2x':
+                created = _create_nunif_engine(scale)
             else:
-                created = _create_opencv_superres_engine(scale)
+                raise RuntimeError(f'Unsupported backend: {backend}')
 
             with _SUPERRES_ENGINE_LOCK:
                 _SUPERRES_ENGINE_CACHE[cache_key] = created
@@ -479,14 +483,11 @@ def _apply_superres_pass(image_bgr: np.ndarray, engine_info: dict) -> np.ndarray
     backend = engine_info['backend']
     engine = engine_info['engine']
 
-    if backend == 'realesrgan':
+    if backend == 'nunif.waifu2x':
         output = engine.upsample(image_bgr)
         if output.dtype != np.uint8:
             output = np.clip(output, 0, 255).astype(np.uint8)
         return output
-
-    if backend == 'opencv.dnn_superres':
-        return engine.upsample(image_bgr)
 
     raise RuntimeError(f"Unsupported super-resolution backend: {backend}")
 
@@ -539,6 +540,10 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
     backend_device = 'cpu'
     fallback_used = False
     fallback_reason = ''
+    package_name = ''
+    package_version = ''
+    package_source = ''
+    package_commit = ''
     try:
         for pass_scale in pass_scales:
             engine_info = _create_superres_engine(pass_scale)
@@ -546,10 +551,15 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
             model_names.append(str(engine_info.get('model_name', '')))
             backend_name = engine_info['backend']
             backend_device = str(engine_info.get('device', backend_device))
+            if backend_name == 'nunif.waifu2x':
+                package_name = str(engine_info.get('package', package_name or 'nunif-waifu2x'))
+                package_version = str(engine_info.get('package_version', package_version or 'master'))
+                package_source = str(engine_info.get('package_source', package_source or NUNIF_REPO_URL))
+                package_commit = str(engine_info.get('package_commit', package_commit or ''))
             current = _apply_superres_pass(current, engine_info)
 
-            # Real-ESRGAN already performs strong restoration; avoid re-denoising it.
-            if denoise_mix > 0.25 and backend_name != 'realesrgan':
+            # NUNIF already applies noise-aware restoration; avoid adding heavy post-denoise.
+            if denoise_mix > 0.25 and backend_name != 'nunif.waifu2x':
                 sigma_color = 14 + (34 * denoise_mix)
                 current = cv2.bilateralFilter(current, d=0, sigmaColor=sigma_color, sigmaSpace=4)
     except Exception as exc:
@@ -567,8 +577,8 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
             denoise_strength=denoise_strength,
         )
 
-    if backend_name == 'realesrgan':
-        sharpen_mix = min(sharpen_mix, 0.42)
+    if backend_name == 'nunif.waifu2x':
+        sharpen_mix = min(sharpen_mix, 0.4)
 
     if sharpen_mix > 0.12:
         blur = cv2.GaussianBlur(current, (0, 0), sigmaX=1.05)
@@ -580,12 +590,10 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
 
     if fallback_used:
         method_name = 'Resize+Enhance (fallback)'
-    elif backend_name == 'realesrgan':
-        method_name = 'Real-ESRGAN'
-    elif any('fsrcnn' in str(name).lower() for name in model_names):
-        method_name = 'FSRCNN'
+    elif backend_name == 'nunif.waifu2x':
+        method_name = 'NUNIF waifu2x'
     else:
-        method_name = 'EDSR'
+        method_name = 'NUNIF'
 
     return current, {
         'method': method_name,
@@ -599,6 +607,10 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
         'model_names': model_names,
         'fallback_used': fallback_used,
         'fallback_reason': fallback_reason,
+        'package': package_name,
+        'package_version': package_version,
+        'package_source': package_source,
+        'package_commit': package_commit,
     }
 
 
@@ -691,9 +703,19 @@ def _enhance_pipeline(image_bgr: np.ndarray, settings: dict | None = None, progr
     return final, s, upscale_meta
 
 
+def enhance_image_with_meta(image_bgr: np.ndarray, settings: dict | None = None) -> tuple[np.ndarray, dict, dict]:
+    final_pil, normalized_settings, upscale_meta = _enhance_pipeline(
+        image_bgr,
+        settings=settings,
+        progress_callback=None,
+    )
+    enhanced_bgr = cv2.cvtColor(np.array(final_pil), cv2.COLOR_RGB2BGR)
+    return enhanced_bgr, normalized_settings, upscale_meta
+
+
 def enhance_image(image_bgr: np.ndarray, settings: dict | None = None) -> np.ndarray:
-    final_pil, _, _ = _enhance_pipeline(image_bgr, settings=settings, progress_callback=None)
-    return cv2.cvtColor(np.array(final_pil), cv2.COLOR_RGB2BGR)
+    enhanced_bgr, _, _ = enhance_image_with_meta(image_bgr, settings=settings)
+    return enhanced_bgr
 
 
 def generate_comparison(original_path: str, enhanced_img: Image.Image) -> Image.Image:
@@ -745,7 +767,29 @@ def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, s
     resolution_gain = int(max(0, ((enhanced_img.width * enhanced_img.height) / max(1, orig.shape[1] * orig.shape[0]) - 1) * 100))
 
     resolved_scale = int((upscale_meta or {}).get('scale', s.get('upscale_scale', 4)))
-    resolved_method = str((upscale_meta or {}).get('method', 'EDSR'))
+    resolved_method = str((upscale_meta or {}).get('method', 'NUNIF waifu2x'))
+    resolved_backend = str((upscale_meta or {}).get('backend', 'unknown'))
+    package_version = str((upscale_meta or {}).get('package_version', '')).strip()
+    package_commit = str((upscale_meta or {}).get('package_commit', '')).strip()
+
+    model_names = [
+        str(name).strip() for name in ((upscale_meta or {}).get('model_names') or [])
+        if str(name).strip()
+    ]
+    model_summary = ', '.join(sorted(set(model_names))) if model_names else ''
+
+    super_resolution_label = f'{resolved_method} x{resolved_scale}'
+    if resolved_backend.startswith('nunif'):
+        version_label = f' {package_version}' if package_version else ''
+        commit_label = f' @{package_commit}' if package_commit else ''
+        model_label = f' ({model_summary})' if model_summary else ''
+        super_resolution_label = f'NUNIF waifu2x{version_label}{commit_label}{model_label} x{resolved_scale}'
+
+    upscale_engine_label = resolved_backend
+    if resolved_backend.startswith('nunif'):
+        upscale_engine_label = f'nunif.waifu2x {package_version or "master"}'
+        if package_commit:
+            upscale_engine_label = f'{upscale_engine_label} ({package_commit})'
 
     return {
         'brightness_increase': f'+{brightness_delta}',
@@ -753,7 +797,8 @@ def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, s
         'noise_reduction': f'-{noise_reduction}%',
         'sharpness_boost': f'+{sharpness_boost}%',
         'resolution_gain': f'+{resolution_gain}%',
-        'super_resolution': f'{resolved_method} x{resolved_scale}',
+        'super_resolution': super_resolution_label,
+        'upscale_engine': upscale_engine_label,
         'output_resolution': f'{enhanced_img.width} x {enhanced_img.height}',
     }
 

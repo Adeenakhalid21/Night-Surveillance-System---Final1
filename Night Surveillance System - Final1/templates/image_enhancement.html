@@ -143,7 +143,7 @@
                 <option value="8">8x (Deep SR Auto Multi-Pass)</option>
                 <option value="16">16x (Deep SR Auto Multi-Pass)</option>
               </select>
-              <small>Uses Real-ESRGAN on GPU and fast FSRCNN on CPU. No interpolation-only upscale.</small>
+              <small>Uses nagadomi/NUNIF waifu2x for deep super-resolution, with resize fallback on constrained systems.</small>
             </label>
           </div>
 
@@ -189,6 +189,20 @@
             <div class="job-status" id="jobStatus">Waiting for image...</div>
           </div>
 
+          <div class="loading-section" id="loadingSection" hidden aria-live="polite">
+            <div class="loading-head">
+              <span class="material-symbols-sharp loading-spinner-icon">progress_activity</span>
+              <div>
+                <h3>Enhancement Loading</h3>
+                <p class="loading-subtext" id="loadingSubtext">Waiting for enhancement job...</p>
+              </div>
+            </div>
+            <div class="loading-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="loadingTrack">
+              <div class="loading-bar" id="loadingBar"></div>
+            </div>
+            <p class="loading-percent" id="loadingPercent">0%</p>
+          </div>
+
           <div class="stats-grid" id="statsGrid" hidden>
             <article class="stat-card" data-stat="brightness_increase">
               <h4>Brightness</h4>
@@ -212,7 +226,11 @@
             </article>
             <article class="stat-card" data-stat="super_resolution">
               <h4>SR Model</h4>
-              <p class="stat-value" id="statSuperResolution">EDSR x4</p>
+              <p class="stat-value" id="statSuperResolution">NUNIF waifu2x x4</p>
+            </article>
+            <article class="stat-card" data-stat="upscale_engine">
+              <h4>SR Engine</h4>
+              <p class="stat-value" id="statUpscaleEngine">nunif.waifu2x</p>
             </article>
             <article class="stat-card" data-stat="output_resolution">
               <h4>Output Size</h4>

@@ -83,9 +83,11 @@
       <main>
            <h1>Dashboard</h1>
 
-           <div class="date" style="display:flex; align-items:center; gap:1rem;">
-             <input type="date" >
-             <span style="opacity:.8;">Welcome, {{ session.get('firstname','User') }}</span>
+           <div class="date" style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
+             <span id="live-datetime" style="padding:0.45rem 0.7rem; border-radius:0.6rem; background:var(--clr-white); box-shadow:var(--box-shadow); font-size:0.85rem;">
+               --
+             </span>
+             <span style="opacity:.85;">Welcome, {{ display_name or session.get('firstname', 'User') }}</span>
            </div>
 
         <div class="camera-controls" style="margin: 1rem 0; text-align: center;">
@@ -128,8 +130,8 @@
    </div>
     <div class="profile">
        <div class="info">
-           <p><b>Profile</b></p>
-           <p>Admin</p>
+         <p><b>{{ display_name or 'User' }}</b></p>
+         <p>{{ profile_role or 'Admin' }}</p>
            <small class="text-muted"></small>
        </div>
        <div class="profile-photo">
@@ -145,7 +147,7 @@
               <div class="middle">
                 <div class="left">
                   <h3>Cameras</h3>
-                  <h1>{{ cam_count or 0 }}</h1>
+                  <h1 id="cam-count">{{ cam_count or 0 }}</h1>
                 </div>
               </div>
               <small class="text-muted">Total configured</small>
@@ -156,7 +158,7 @@
               <div class="middle">
                 <div class="left">
                   <h3>Datasets</h3>
-                  <h1>{{ dataset_count or 0 }}</h1>
+                  <h1 id="dataset-count">{{ dataset_count or 0 }}</h1>
                 </div>
               </div>
               <small class="text-muted">Available</small>
@@ -167,7 +169,7 @@
               <div class="middle">
                 <div class="left">
                   <h3>Detections</h3>
-                  <h1>{{ detections_count or 0 }}</h1>
+                  <h1 id="detections-count">{{ detections_count or 0 }}</h1>
                 </div>
               </div>
               <small class="text-muted">All time</small>
@@ -178,7 +180,7 @@
               <div class="middle">
                 <div class="left">
                   <h3>Events</h3>
-                  <h1>{{ events_count or 0 }}</h1>
+                  <h1 id="events-count">{{ events_count or 0 }}</h1>
                 </div>
               </div>
               <small class="text-muted">All time</small>
@@ -208,11 +210,65 @@
      const videoContainer = document.getElementById('video-container');
      const videoStream = document.getElementById('video-stream');
      const cameraBtnText = document.getElementById('camera-btn-text');
+     const liveDatetimeEl = document.getElementById('live-datetime');
      let cameraActive = false;
      let eventSource = null;
     let lastAnomalyEventId = 0;
     const anomalyPopupCooldownMs = 6000;
     const anomalyPopupByClass = new Map();
+
+     function updateLiveDateTime() {
+       if (!liveDatetimeEl) return;
+       const now = new Date();
+       const datePart = now.toLocaleDateString(undefined, {
+         weekday: 'short',
+         year: 'numeric',
+         month: 'short',
+         day: 'numeric',
+       });
+       const timePart = now.toLocaleTimeString(undefined, {
+         hour: '2-digit',
+         minute: '2-digit',
+         second: '2-digit',
+       });
+       liveDatetimeEl.textContent = `${datePart} | ${timePart}`;
+     }
+
+     function setStatValue(id, value) {
+       const node = document.getElementById(id);
+       if (!node) return;
+       const parsed = Number(value);
+       node.textContent = Number.isFinite(parsed) ? String(parsed) : '0';
+     }
+
+     async function refreshDashboardStats() {
+       try {
+         const response = await fetch('{{ url_for("dashboard_stats_api") }}', {
+           method: 'GET',
+           headers: {
+             'Accept': 'application/json',
+           },
+           cache: 'no-store',
+         });
+
+         if (!response.ok) {
+           return;
+         }
+
+         const payload = await response.json();
+         setStatValue('cam-count', payload.cam_count);
+         setStatValue('dataset-count', payload.dataset_count);
+         setStatValue('detections-count', payload.detections_count);
+         setStatValue('events-count', payload.events_count);
+       } catch (err) {
+         console.warn('Dashboard stats refresh failed:', err);
+       }
+     }
+
+     updateLiveDateTime();
+     refreshDashboardStats();
+     setInterval(updateLiveDateTime, 1000);
+     setInterval(refreshDashboardStats, 15000);
 
      toggleCameraBtn.addEventListener('click', function() {
        cameraActive = !cameraActive;

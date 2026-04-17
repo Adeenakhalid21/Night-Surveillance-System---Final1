@@ -44,6 +44,23 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install "numpy==1.24.3" "pillow==10.4.0" --force-reinstall --no-deps
 ```
 
+### Step 3.1 (Recommended): Configure NUNIF Super-Resolution
+```powershell
+# Clone NUNIF once into your project (skip if folder already exists)
+if (-not (Test-Path .\third_party\nunif)) {
+  git clone https://github.com/nagadomi/nunif.git .\third_party\nunif
+}
+
+# Tell this app to use NUNIF backend
+$env:SUPERRES_ENGINE = "nunif"
+
+# Optional: model profile for camera footage (photo/art/art_scan)
+$env:NUNIF_MODEL_TYPE = "photo"
+
+# Verify backend and warm up SR models
+python -c "import enhancement; print('backend:', enhancement.superres_backend_name()); print('models:', enhancement.ensure_superres_models())"
+```
+
 ---
 
 ## 🎯 Running the Application

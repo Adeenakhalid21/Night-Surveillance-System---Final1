@@ -92,6 +92,73 @@
       margin: 2rem auto;
       display: none;
     }
+    .loading-panel {
+      display: none;
+      margin-top: 1rem;
+      padding: 0.85rem;
+      border-radius: var(--border-radius-1);
+      border: 1px solid var(--color-primary);
+      background: rgba(15, 23, 42, 0.06);
+      text-align: left;
+    }
+    .loading-panel.active {
+      display: block;
+    }
+    .loading-head {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      margin-bottom: 0.55rem;
+    }
+    .loading-panel .spinner {
+      display: block;
+      width: 30px;
+      height: 30px;
+      margin: 0;
+      flex-shrink: 0;
+    }
+    .loading-copy h4 {
+      margin: 0;
+      font-size: 0.95rem;
+    }
+    .loading-copy p {
+      margin: 0.2rem 0 0;
+      font-size: 0.82rem;
+      opacity: 0.85;
+    }
+    .loading-steps {
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 0.3rem;
+      list-style: none;
+    }
+    .loading-steps li {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.82rem;
+      opacity: 0.78;
+    }
+    .loading-steps li.running {
+      opacity: 1;
+      color: var(--color-warning);
+      font-weight: 600;
+    }
+    .loading-steps li.done {
+      opacity: 1;
+      color: var(--color-success);
+    }
+    .loading-steps li.failed {
+      opacity: 1;
+      color: var(--color-danger);
+    }
+    .loading-step-icon {
+      width: 1.75rem;
+      text-align: center;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 0.75rem;
+    }
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
@@ -109,6 +176,59 @@
     .alert-error {
       background: var(--color-danger);
       color: white;
+    }
+    .analysis-card {
+      grid-column: 1 / -1;
+    }
+    .analysis-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+    }
+    .analysis-item {
+      background: var(--color-light);
+      border-radius: var(--border-radius-1);
+      padding: 0.65rem 0.7rem;
+      text-align: left;
+    }
+    .analysis-item small {
+      display: block;
+      opacity: 0.8;
+      margin-bottom: 0.25rem;
+    }
+    .analysis-item b {
+      font-size: 1rem;
+    }
+    .severity-badge {
+      display: inline-block;
+      margin-left: 0.5rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      vertical-align: middle;
+    }
+    .severity-severe {
+      background: #7f1d1d;
+      color: #fee2e2;
+    }
+    .severity-moderate {
+      background: #78350f;
+      color: #ffedd5;
+    }
+    .severity-mild {
+      background: #166534;
+      color: #dcfce7;
+    }
+    .severity-normal {
+      background: #164e63;
+      color: #cffafe;
+    }
+    .meta-line {
+      margin-top: 0.55rem;
+      opacity: 0.85;
+      text-align: left;
+      font-size: 0.85rem;
     }
   </style>
 </head>
@@ -181,8 +301,22 @@
                <p>or click to browse</p>
                <input type="file" id="file-input" accept="image/jpeg,image/jpg,image/png,image/bmp" style="display: none;">
              </div>
-             
-             <div class="spinner" id="spinner"></div>
+
+               <div class="loading-panel" id="loading-panel" aria-live="polite" hidden>
+                 <div class="loading-head">
+                   <div class="spinner" id="spinner"></div>
+                   <div class="loading-copy">
+                     <h4 id="loading-title">Preparing analysis...</h4>
+                     <p id="loading-message">Waiting for image upload.</p>
+                   </div>
+                 </div>
+                 <ul class="loading-steps" id="loading-steps">
+                   <li data-step="upload"><span class="loading-step-icon">[]</span> Uploading image</li>
+                   <li data-step="enhance"><span class="loading-step-icon">[]</span> Enhancing low-light details</li>
+                   <li data-step="detect"><span class="loading-step-icon">[]</span> Running object detection</li>
+                   <li data-step="finalize"><span class="loading-step-icon">[]</span> Finalizing results</li>
+                 </ul>
+               </div>
              
              <button class="btn-upload" id="upload-btn" disabled>
                <span class="material-symbols-sharp">send</span> Analyze Image
@@ -245,11 +379,153 @@
      const fileInput = document.getElementById('file-input');
      const uploadBtn = document.getElementById('upload-btn');
      const spinner = document.getElementById('spinner');
+     const loadingPanel = document.getElementById('loading-panel');
+     const loadingTitle = document.getElementById('loading-title');
+     const loadingMessage = document.getElementById('loading-message');
+     const loadingSteps = Array.from(document.querySelectorAll('#loading-steps li'));
      const previewContainer = document.getElementById('preview-container');
      const successAlert = document.getElementById('success-alert');
      const errorAlert = document.getElementById('error-alert');
+
+     const loadingStepOrder = ['upload', 'enhance', 'detect', 'finalize'];
+     const loadingStepMessages = {
+       upload: 'Uploading image to the low-light pipeline...',
+       enhance: 'Applying enhancement and denoising stages...',
+       detect: 'Running AI detection on enhanced frame...',
+       finalize: 'Preparing final output and metrics...',
+     };
      
      let selectedFile = null;
+     let loadingStepTimer = null;
+     let loadingHideTimer = null;
+
+     function clearLoadingTimers() {
+       if (loadingStepTimer) {
+         clearInterval(loadingStepTimer);
+         loadingStepTimer = null;
+       }
+       if (loadingHideTimer) {
+         clearTimeout(loadingHideTimer);
+         loadingHideTimer = null;
+       }
+     }
+
+     function setLoadingPanelVisible(visible) {
+       if (!loadingPanel) {
+         return;
+       }
+       loadingPanel.hidden = !visible;
+       loadingPanel.classList.toggle('active', !!visible);
+     }
+
+     function setLoadingStep(stepKey, status) {
+       const row = loadingSteps.find((entry) => entry.dataset.step === stepKey);
+       if (!row) {
+         return;
+       }
+       row.classList.remove('running', 'done', 'failed');
+       const icon = row.querySelector('.loading-step-icon');
+       if (status === 'running') {
+         row.classList.add('running');
+         if (icon) {
+           icon.textContent = '...';
+         }
+       } else if (status === 'done') {
+         row.classList.add('done');
+         if (icon) {
+           icon.textContent = 'OK';
+         }
+       } else if (status === 'failed') {
+         row.classList.add('failed');
+         if (icon) {
+           icon.textContent = '!!';
+         }
+       } else if (icon) {
+         icon.textContent = '[]';
+       }
+     }
+
+     function resetLoadingSteps() {
+       loadingSteps.forEach((entry) => {
+         entry.classList.remove('running', 'done', 'failed');
+         const icon = entry.querySelector('.loading-step-icon');
+         if (icon) {
+           icon.textContent = '[]';
+         }
+       });
+       if (loadingTitle) {
+         loadingTitle.textContent = 'Preparing analysis...';
+       }
+       if (loadingMessage) {
+         loadingMessage.textContent = 'Waiting for image upload.';
+       }
+     }
+
+     function startLoadingSequence() {
+       clearLoadingTimers();
+       resetLoadingSteps();
+       setLoadingPanelVisible(true);
+
+       let idx = 0;
+       const firstStep = loadingStepOrder[idx];
+       setLoadingStep(firstStep, 'running');
+       if (loadingTitle) {
+         loadingTitle.textContent = 'Analyzing low-light image...';
+       }
+       if (loadingMessage) {
+         loadingMessage.textContent = loadingStepMessages[firstStep] || 'Starting analysis...';
+       }
+
+       loadingStepTimer = setInterval(() => {
+         if (idx >= loadingStepOrder.length - 1) {
+           return;
+         }
+         const current = loadingStepOrder[idx];
+         setLoadingStep(current, 'done');
+         idx += 1;
+         const next = loadingStepOrder[idx];
+         setLoadingStep(next, 'running');
+         if (loadingMessage) {
+           loadingMessage.textContent = loadingStepMessages[next] || 'Processing...';
+         }
+       }, 1200);
+     }
+
+     function finishLoadingSequence(success, message) {
+       clearLoadingTimers();
+
+       if (success) {
+         loadingStepOrder.forEach((stepKey) => setLoadingStep(stepKey, 'done'));
+         if (loadingTitle) {
+           loadingTitle.textContent = 'Analysis complete';
+         }
+         if (loadingMessage) {
+           loadingMessage.textContent = message || 'Results are ready below.';
+         }
+         loadingHideTimer = setTimeout(() => {
+           setLoadingPanelVisible(false);
+           resetLoadingSteps();
+         }, 900);
+         return;
+       }
+
+       const running = loadingSteps.find((entry) => entry.classList.contains('running'));
+       if (running) {
+         setLoadingStep(running.dataset.step, 'failed');
+       } else {
+         setLoadingStep(loadingStepOrder[0], 'failed');
+       }
+       if (loadingTitle) {
+         loadingTitle.textContent = 'Analysis failed';
+       }
+       if (loadingMessage) {
+         loadingMessage.textContent = message || 'Unable to process this image right now.';
+       }
+       loadingHideTimer = setTimeout(() => {
+         setLoadingPanelVisible(false);
+         resetLoadingSteps();
+       }, 1500);
+     }
 
      // Click to browse
      uploadArea.addEventListener('click', () => fileInput.click());
@@ -286,6 +562,9 @@
        }
        selectedFile = file;
        uploadBtn.disabled = false;
+       setLoadingPanelVisible(false);
+       clearLoadingTimers();
+       resetLoadingSteps();
        uploadArea.innerHTML = `
          <span class="material-symbols-sharp" style="font-size: 3rem; color: var(--color-success);">check_circle</span>
          <h3>${file.name}</h3>
@@ -300,8 +579,8 @@
        formData.append('image', selectedFile);
 
        uploadBtn.disabled = true;
-       spinner.style.display = 'block';
        hideAlerts();
+       startLoadingSequence();
 
        try {
          const response = await fetch('/lowlight_detection', {
@@ -312,37 +591,97 @@
          const data = await response.json();
          
          if (data.success) {
-           showSuccess(`Detected ${data.detections.length} objects in the image!`);
+           const anomalyCount = data.counts && Number.isFinite(data.counts.anomaly) ? data.counts.anomaly : 0;
+           const anomalyText = anomalyCount > 0 ? `, including ${anomalyCount} anomalies` : '';
+           showSuccess(`Detected ${data.detections.length} objects${anomalyText}.`);
            displayResults(data);
+           finishLoadingSequence(true, 'Low-light enhancement and detection finished.');
          } else {
            showError(data.error || 'Detection failed');
+           finishLoadingSequence(false, data.error || 'Detection failed.');
          }
        } catch (error) {
          showError('Network error: ' + error.message);
+         finishLoadingSequence(false, 'Network error while contacting server.');
        } finally {
-         spinner.style.display = 'none';
          uploadBtn.disabled = false;
        }
      });
 
      function displayResults(data) {
+       const detections = Array.isArray(data.detections) ? data.detections : [];
+       const analysis = data.lowlight_analysis || {};
+       const before = analysis.before || {};
+       const after = analysis.after || {};
+       const improvement = analysis.improvement || {};
+       const beforeMetrics = before.metrics || {};
+       const afterMetrics = after.metrics || {};
+       const upscaleMeta = data.upscale_meta || {};
+       const severity = (after.severity || before.severity || 'normal').toLowerCase();
+       const hasAnalysis = Object.keys(analysis).length > 0;
+
+       const analysisMarkup = hasAnalysis ? `
+         <div class="preview-card analysis-card">
+           <h3>
+             Low-Light Analysis
+             <span class="severity-badge severity-${severity}">${String(after.severity || 'unknown').toUpperCase()}</span>
+           </h3>
+           <div class="analysis-grid">
+             <div class="analysis-item">
+               <small>Low-Light Score (Before -> After)</small>
+               <b>${before.low_light_score ?? '-'} -> ${after.low_light_score ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Brightness Gain</small>
+               <b>${improvement.brightness_gain ?? '-'} </b>
+             </div>
+             <div class="analysis-item">
+               <small>Shadow Reduction (%)</small>
+               <b>${improvement.shadow_reduction_percent ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Contrast Gain</small>
+               <b>${improvement.contrast_gain ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Luminance (Before -> After)</small>
+               <b>${beforeMetrics.mean_luminance ?? '-'} -> ${afterMetrics.mean_luminance ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Improvement Quality</small>
+               <b>${String(improvement.quality || 'n/a').toUpperCase()}</b>
+             </div>
+           </div>
+           <p class="meta-line">${after.recommendation || before.recommendation || ''}</p>
+         </div>
+       ` : '';
+
        previewContainer.innerHTML = `
          <div class="preview-card">
            <h3>Original Image</h3>
            <img src="${data.original_image}" alt="Original">
          </div>
          <div class="preview-card">
-           <h3>Detection Results (${data.detections.length} objects)</h3>
+           <h3>Enhanced Image</h3>
+           <img src="${data.enhanced_image || data.result_image}" alt="Enhanced">
+           <p class="meta-line">
+             SR: <b>${upscaleMeta.method || 'Auto'}</b>
+             (x${upscaleMeta.scale || 1}, ${upscaleMeta.backend || 'unknown'})
+           </p>
+         </div>
+         <div class="preview-card">
+           <h3>Detection Results (${detections.length} objects)</h3>
            <img src="${data.result_image}" alt="Result">
            <div class="detection-list">
-             ${data.detections.map(d => `
+             ${detections.length ? detections.map(d => `
                <div class="detection-item">
                  <span>${d.class}</span>
                  <span style="color: var(--color-success);">${(d.confidence * 100).toFixed(1)}%</span>
                </div>
-             `).join('')}
+             `).join('') : '<div class="detection-item"><span>No objects detected</span><span>0%</span></div>'}
            </div>
          </div>
+         ${analysisMarkup}
        `;
      }
 
