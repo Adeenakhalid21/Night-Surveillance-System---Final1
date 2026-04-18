@@ -36,11 +36,14 @@ ENHANCEMENT_STAGES = [
 
 SUPERRES_ALLOWED_SCALES = (2, 4, 8, 16)
 SUPERRES_MAX_OUTPUT_PIXELS = int(float(os.getenv('SUPERRES_MAX_OUTPUT_PIXELS', '120000000')))
-SUPERRES_ENGINE = str(os.getenv('SUPERRES_ENGINE', 'nunif')).strip().lower()
+# Night Shield fix: Default to Real-ESRGAN for real-world surveillance imagery.
+SUPERRES_ENGINE = str(os.getenv('SUPERRES_ENGINE', 'realesrgan')).strip().lower()
 SUPERRES_TILE = max(0, int(float(os.getenv('SUPERRES_TILE', '256'))))
 SUPERRES_TILE_PAD = max(2, int(float(os.getenv('SUPERRES_TILE_PAD', '12'))))
 SUPERRES_PREPAD = max(0, int(float(os.getenv('SUPERRES_PREPAD', '0'))))
 SUPERRES_HALF = str(os.getenv('SUPERRES_HALF', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+# Night Shield fix: Keep Real-ESRGAN model URL centralized for metadata and loader reuse.
+REALESRGAN_MODEL_URL = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
 
 NUNIF_REPO_URL = 'https://github.com/nagadomi/nunif'
 NUNIF_REPO_DIR = Path(__file__).resolve().parent / 'third_party' / 'nunif'
@@ -51,7 +54,7 @@ if NUNIF_MODEL_TYPE == 'scan':
 if NUNIF_MODEL_TYPE not in ('art', 'art_scan', 'photo', 'swin_unet/art', 'swin_unet/art_scan', 'swin_unet/photo', 'cunet/art', 'upconv_7/art', 'upconv_7/photo'):
     NUNIF_MODEL_TYPE = 'photo'
 
-NUNIF_NOISE_LEVEL = max(0, min(3, int(float(os.getenv('NUNIF_NOISE_LEVEL', '2')))))
+NUNIF_NOISE_LEVEL = max(0, min(3, int(float(os.getenv('NUNIF_NOISE_LEVEL', '1')))))
 NUNIF_BATCH_SIZE = max(1, int(float(os.getenv('NUNIF_BATCH_SIZE', '1'))))
 NUNIF_TILE_SIZE = max(64, int(float(os.getenv('NUNIF_TILE_SIZE', str(max(256, SUPERRES_TILE))))))
 NUNIF_TTA = str(os.getenv('NUNIF_TTA', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
@@ -65,6 +68,10 @@ ENHANCEMENT_FAST_PIXELS = max(640 * 480, int(float(os.getenv('ENHANCEMENT_FAST_P
 _SUPERRES_ENGINE_CACHE = {}
 _SUPERRES_ENGINE_LOCK = threading.Lock()
 _NUNIF_DIST_INFO_CACHE = None
+# Night Shield fix: Cache Real-ESRGAN engine and warning state across requests.
+_REALESRGAN_ENGINE_INSTANCE = None
+_REALESRGAN_LOAD_ERROR = None
+_REALESRGAN_WARNED = False
 
 
 def enhancement_stage_keys() -> list[dict]:
@@ -75,13 +82,21 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+# Night Shield fix: Safely read float environment values with fallback defaults.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return float(default)
+
+
 def _normalize_settings(settings: dict | None) -> dict:
     defaults = {
-        'brightness': 55.0,
-        'contrast': 65.0,
-        'sharpness': 60.0,
-        'denoise': 55.0,
-        'upscale': 70.0,
+        'brightness': 64.0,
+        'contrast': 0.0,
+        'sharpness': 0.0,
+        'denoise': 1.0,
+        'upscale': 100.0,
         'upscale_scale': 4,
     }
     if not settings:
@@ -111,9 +126,10 @@ def _lowlight_severity(score: int) -> str:
 
 def _lowlight_recommendation(severity: str) -> str:
     if severity == 'severe':
-        return 'Strong enhancement suggested: high denoise, high contrast, and NUNIF waifu2x x4 or above.'
+        # Night Shield fix: Align recommendation copy with the new Real-ESRGAN default backend.
+        return 'Strong enhancement suggested: high denoise, high contrast, and Real-ESRGAN x4 or above.'
     if severity == 'moderate':
-        return 'Enhancement recommended: moderate denoise plus NUNIF waifu2x x2 to x4.'
+        return 'Enhancement recommended: moderate denoise plus Real-ESRGAN x2 to x4.'
     if severity == 'mild':
         return 'Light enhancement is enough: mild denoise and detail-preserving upscale.'
     return 'Lighting is acceptable. Enhancement is optional unless detection quality drops.'
@@ -174,15 +190,34 @@ def analyze_lowlight_improvement(original_bgr: np.ndarray, enhanced_bgr: np.ndar
     brightness_gain = round(float(after_metrics.get('mean_luminance', 0.0)) - float(before_metrics.get('mean_luminance', 0.0)), 2)
     contrast_gain = round(float(after_metrics.get('contrast_std', 0.0)) - float(before_metrics.get('contrast_std', 0.0)), 2)
     shadow_reduction = round(float(before_metrics.get('shadow_ratio_percent', 0.0)) - float(after_metrics.get('shadow_ratio_percent', 0.0)), 2)
+    noise_delta = round(float(after_metrics.get('noise_proxy', 0.0)) - float(before_metrics.get('noise_proxy', 0.0)), 2)
+    highlight_delta = round(float(after_metrics.get('highlight_ratio_percent', 0.0)) - float(before_metrics.get('highlight_ratio_percent', 0.0)), 2)
+    dynamic_range_gain = round(float(after_metrics.get('dynamic_range', 0.0)) - float(before_metrics.get('dynamic_range', 0.0)), 2)
 
-    if score_reduction >= 25:
+    quality_score = (
+        (score_reduction * 1.15)
+        + max(0.0, brightness_gain * 0.45)
+        + max(0.0, contrast_gain * 0.9)
+        + max(0.0, shadow_reduction * 0.5)
+        + max(0.0, dynamic_range_gain * 0.18)
+        - max(0.0, highlight_delta * 1.2)
+        - max(0.0, noise_delta * 0.8)
+    )
+    quality_score = round(float(quality_score), 2)
+
+    if quality_score >= 50:
+        quality = 'excellent'
+    elif quality_score >= 30:
         quality = 'strong'
-    elif score_reduction >= 12:
+    elif quality_score >= 18:
         quality = 'moderate'
-    elif score_reduction >= 5:
+    elif quality_score >= 8:
         quality = 'small'
     else:
         quality = 'minimal'
+
+    overexposed = bool(highlight_delta > 7.5 and brightness_gain > 16.0)
+    improved = bool(quality_score >= 10.0 and not overexposed)
 
     return {
         'before': before,
@@ -192,8 +227,13 @@ def analyze_lowlight_improvement(original_bgr: np.ndarray, enhanced_bgr: np.ndar
             'brightness_gain': brightness_gain,
             'contrast_gain': contrast_gain,
             'shadow_reduction_percent': shadow_reduction,
+            'detail_gain': dynamic_range_gain,
+            'highlight_delta_percent': highlight_delta,
+            'noise_delta': noise_delta,
+            'quality_score': quality_score,
             'quality': quality,
-            'improved': bool(score_reduction >= 5 or brightness_gain >= 8.0),
+            'overexposed_risk': overexposed,
+            'improved': improved,
         },
     }
 
@@ -205,6 +245,44 @@ def _emit(progress_callback, stage_key: str, stage_status: str) -> None:
         progress_callback(stage_key, stage_status)
     except Exception:
         pass
+
+
+# Night Shield fix: Stage 1 low-light brightening before any super-resolution.
+def brighten_lowlight(img: np.ndarray) -> np.ndarray:
+    if img is None or img.size == 0:
+        raise ValueError('Input image is empty')
+
+    gamma = max(0.1, _env_float('LOWLIGHT_GAMMA', 2.2))
+    inv_gamma = 1.0 / gamma
+    table = np.array([
+        ((i / 255.0) ** inv_gamma) * 255
+        for i in np.arange(256)
+    ]).astype('uint8')
+    gamma_corrected = cv2.LUT(img, table)
+
+    clahe_clip = max(0.1, _env_float('CLAHE_CLIP_LIMIT', 3.0))
+    lab = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_channel)
+    lab_enhanced = cv2.merge([l_enhanced, a_channel, b_channel])
+    result = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+    return result
+
+
+# Night Shield fix: Stage 2 denoise pass after brightening to suppress lifted grain.
+def denoise(img: np.ndarray) -> np.ndarray:
+    if img is None or img.size == 0:
+        raise ValueError('Input image is empty')
+
+    return cv2.fastNlMeansDenoisingColored(
+        img,
+        None,
+        h=6,
+        hColor=6,
+        templateWindowSize=7,
+        searchWindowSize=21,
+    )
 
 
 def _build_gamma_lut(gamma: float) -> np.ndarray:
@@ -238,6 +316,44 @@ def _torch_device_name() -> str:
 
 def _nunif_available() -> bool:
     return torch is not None
+
+
+# Night Shield fix: Load Real-ESRGAN using the requested architecture and runtime options.
+def _load_realesrgan():
+    from realesrgan import RealESRGANer
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+
+    model = RRDBNet(
+        num_in_ch=3,
+        num_out_ch=3,
+        num_feat=64,
+        num_block=23,
+        num_grow_ch=32,
+        scale=4,
+    )
+
+    return RealESRGANer(
+        scale=4,
+        model_path=REALESRGAN_MODEL_URL,
+        model=model,
+        tile=256,
+        tile_pad=10,
+        pre_pad=0,
+        half=False,
+    )
+
+
+# Night Shield fix: Normalize the selected SR engine into one of the supported backend IDs.
+def _superres_engine_mode() -> str:
+    # Night Shield fix: Resolve backend from current environment so runtime config switches are honored.
+    engine = str(os.getenv('SUPERRES_ENGINE', SUPERRES_ENGINE) or '').strip().lower()
+    if engine in ('none', 'off', 'disable', 'disabled'):
+        return 'none'
+    if engine in ('nunif', 'nunif.waifu2x', 'waifu2x', 'nagadomi.nunif'):
+        return 'nunif.waifu2x'
+    if engine in ('realesrgan', 'real-esrgan', 'real_esrgan'):
+        return 'realesrgan'
+    return 'realesrgan'
 
 
 def _resolve_nunif_repo_dir() -> Path:
@@ -313,10 +429,11 @@ def _nunif_distribution_info() -> dict:
 
 
 def _backend_priority() -> list[str]:
-    if SUPERRES_ENGINE in ('nunif', 'nunif.waifu2x', 'waifu2x', 'nagadomi.nunif'):
-        return ['nunif.waifu2x']
-    # Keep runtime deterministic even if old env values are still present.
-    return ['nunif.waifu2x']
+    # Night Shield fix: Route SR backend selection through SUPERRES_ENGINE with deterministic fallback.
+    selected = _superres_engine_mode()
+    if selected == 'none':
+        return []
+    return [selected]
 
 
 def _decompose_scale(target_scale: int) -> list[int]:
@@ -333,23 +450,44 @@ def _decompose_scale(target_scale: int) -> list[int]:
 
 def ensure_superres_models() -> dict:
     ready = {}
-    if not _nunif_available():
-        ready['nunif_error'] = 'torch/torchvision not available'
+    backends = _backend_priority()
+    if not backends:
+        # Night Shield fix: Explicitly surface when SR is disabled.
+        ready['superres'] = 'disabled'
         return ready
 
-    for scale in (2, 4):
-        try:
-            info = _create_superres_engine(scale)
-            ready[f'nunif_x{scale}'] = f"{info.get('model_name', 'waifu2x')}:{info.get('method_name', '')}".rstrip(':')
-        except Exception as exc:
-            ready[f'nunif_x{scale}_error'] = str(exc)
+    for backend in backends:
+        if backend == 'nunif.waifu2x':
+            if not _nunif_available():
+                ready['nunif_error'] = 'torch/torchvision not available'
+                continue
+
+            for scale in (2, 4):
+                try:
+                    info = _create_superres_engine(scale)
+                    ready[f'nunif_x{scale}'] = f"{info.get('model_name', 'waifu2x')}:{info.get('method_name', '')}".rstrip(':')
+                except Exception as exc:
+                    ready[f'nunif_x{scale}_error'] = str(exc)
+        elif backend == 'realesrgan':
+            try:
+                info = _create_superres_engine(4)
+                ready['realesrgan_x4'] = f"{info.get('model_name', 'RealESRGAN_x4plus')}:{info.get('method_name', 'x4')}".rstrip(':')
+            except Exception as exc:
+                ready['realesrgan_x4_error'] = str(exc)
+        else:
+            ready[f'{backend}_error'] = f'Unsupported backend: {backend}'
 
     return ready
 
 
 def superres_backend_name() -> str:
-    if _nunif_available():
+    selected = _superres_engine_mode()
+    if selected == 'none':
+        return 'none'
+    if selected == 'nunif.waifu2x' and _nunif_available():
         return 'nunif.waifu2x'
+    if selected == 'realesrgan':
+        return 'realesrgan'
     return 'opencv.resize'
 
 
@@ -444,6 +582,42 @@ def _create_nunif_engine(scale: int) -> dict:
     }
 
 
+def _create_realesrgan_engine(scale: int) -> dict:
+    if scale not in (2, 4):
+        raise ValueError(f'Real-ESRGAN backend supports x2/x4 passes only, got x{scale}.')
+
+    global _REALESRGAN_ENGINE_INSTANCE, _REALESRGAN_LOAD_ERROR
+
+    with _SUPERRES_ENGINE_LOCK:
+        if _REALESRGAN_ENGINE_INSTANCE is None and _REALESRGAN_LOAD_ERROR is None:
+            try:
+                # Night Shield fix: Load Real-ESRGAN once and reuse it across all frames.
+                _REALESRGAN_ENGINE_INSTANCE = _load_realesrgan()
+                _REALESRGAN_LOAD_ERROR = ''
+            except Exception as exc:
+                _REALESRGAN_LOAD_ERROR = str(exc)
+
+        cached_engine = _REALESRGAN_ENGINE_INSTANCE
+        load_error = _REALESRGAN_LOAD_ERROR
+
+    if cached_engine is None:
+        raise RuntimeError(f'Real-ESRGAN backend unavailable: {load_error or "unknown error"}')
+
+    return {
+        'backend': 'realesrgan',
+        'model_path': Path('RealESRGAN_x4plus.pth'),
+        'engine': cached_engine,
+        'scale': int(scale),
+        'device': _torch_device_name(),
+        'model_name': 'RealESRGAN_x4plus',
+        'method_name': f'x{int(scale)}',
+        'package': 'realesrgan',
+        'package_version': '',
+        'package_source': REALESRGAN_MODEL_URL,
+        'package_commit': '',
+    }
+
+
 def _engine_cache_key(backend: str, scale: int, device_name: str) -> str:
     return f"{backend}:x{int(scale)}:{device_name}:{SUPERRES_TILE}:{SUPERRES_TILE_PAD}:{SUPERRES_PREPAD}:{int(SUPERRES_HALF)}"
 
@@ -456,7 +630,7 @@ def _create_superres_engine(scale: int) -> dict:
             errors.append('nunif.waifu2x: dependencies missing')
             continue
 
-        device_name = _torch_device_name() if backend == 'nunif.waifu2x' else 'cpu'
+        device_name = _torch_device_name() if backend in ('nunif.waifu2x', 'realesrgan') else 'cpu'
         cache_key = _engine_cache_key(backend, scale, device_name)
 
         with _SUPERRES_ENGINE_LOCK:
@@ -467,6 +641,8 @@ def _create_superres_engine(scale: int) -> dict:
         try:
             if backend == 'nunif.waifu2x':
                 created = _create_nunif_engine(scale)
+            elif backend == 'realesrgan':
+                created = _create_realesrgan_engine(scale)
             else:
                 raise RuntimeError(f'Unsupported backend: {backend}')
 
@@ -485,6 +661,20 @@ def _apply_superres_pass(image_bgr: np.ndarray, engine_info: dict) -> np.ndarray
 
     if backend == 'nunif.waifu2x':
         output = engine.upsample(image_bgr)
+        if output.dtype != np.uint8:
+            output = np.clip(output, 0, 255).astype(np.uint8)
+        return output
+
+    if backend == 'realesrgan':
+        target_scale = int(engine_info.get('scale', 4))
+        output, _ = engine.enhance(image_bgr, outscale=4)
+
+        if target_scale != 4:
+            h, w = image_bgr.shape[:2]
+            resized_w = max(2, int(w * target_scale))
+            resized_h = max(2, int(h * target_scale))
+            output = cv2.resize(output, (resized_w, resized_h), interpolation=cv2.INTER_CUBIC)
+
         if output.dtype != np.uint8:
             output = np.clip(output, 0, 255).astype(np.uint8)
         return output
@@ -525,6 +715,28 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
     if target_scale not in SUPERRES_ALLOWED_SCALES:
         raise ValueError('Supported super-resolution scales are x2, x4, x8, and x16.')
 
+    # Night Shield fix: Allow bypassing SR entirely when SUPERRES_ENGINE=none.
+    if _superres_engine_mode() == 'none':
+        output = image_bgr.copy()
+        out_h, out_w = output.shape[:2]
+        return output, {
+            'method': 'No Upscaling',
+            'scale': 1,
+            'backend': 'none',
+            'device': 'cpu',
+            'passes': 0,
+            'output_width': int(out_w),
+            'output_height': int(out_h),
+            'models': [],
+            'model_names': [],
+            'fallback_used': False,
+            'fallback_reason': '',
+            'package': '',
+            'package_version': '',
+            'package_source': '',
+            'package_commit': '',
+        }
+
     h, w = image_bgr.shape[:2]
     _validate_superres_budget(w, h, target_scale)
 
@@ -556,6 +768,11 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
                 package_version = str(engine_info.get('package_version', package_version or 'master'))
                 package_source = str(engine_info.get('package_source', package_source or NUNIF_REPO_URL))
                 package_commit = str(engine_info.get('package_commit', package_commit or ''))
+            elif backend_name == 'realesrgan':
+                package_name = str(engine_info.get('package', package_name or 'realesrgan'))
+                package_version = str(engine_info.get('package_version', package_version or ''))
+                package_source = str(engine_info.get('package_source', package_source or REALESRGAN_MODEL_URL))
+                package_commit = str(engine_info.get('package_commit', package_commit or ''))
             current = _apply_superres_pass(current, engine_info)
 
             # NUNIF already applies noise-aware restoration; avoid adding heavy post-denoise.
@@ -566,16 +783,35 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
         # Last-resort fallback ensures output is upscaled even if all deep SR backends fail.
         fallback_used = True
         fallback_reason = str(exc)
-        backend_name = 'opencv.resize'
         backend_device = 'cpu'
         model_files = []
         model_names = []
-        current = _fallback_upscale_bgr(
-            image_bgr,
-            target_scale=target_scale,
-            sharpness_strength=sharpness_strength,
-            denoise_strength=denoise_strength,
-        )
+        selected_backend = _superres_engine_mode()
+
+        if selected_backend == 'realesrgan':
+            # Night Shield fix: Keep app alive when realesrgan/basicsr is missing by using bicubic fallback.
+            global _REALESRGAN_WARNED
+            if not _REALESRGAN_WARNED:
+                print(
+                    f"[Enhancement] Real-ESRGAN unavailable ({fallback_reason}). Falling back to OpenCV INTER_CUBIC.",
+                    flush=True,
+                )
+                _REALESRGAN_WARNED = True
+
+            backend_name = 'opencv.resize.bicubic'
+            current = cv2.resize(
+                image_bgr,
+                (max(2, int(w * target_scale)), max(2, int(h * target_scale))),
+                interpolation=cv2.INTER_CUBIC,
+            )
+        else:
+            backend_name = 'opencv.resize'
+            current = _fallback_upscale_bgr(
+                image_bgr,
+                target_scale=target_scale,
+                sharpness_strength=sharpness_strength,
+                denoise_strength=denoise_strength,
+            )
 
     if backend_name == 'nunif.waifu2x':
         sharpen_mix = min(sharpen_mix, 0.4)
@@ -588,12 +824,16 @@ def _super_resolve_bgr(image_bgr: np.ndarray, target_scale: int, denoise_strengt
     current = np.clip(current, 0, 255).astype(np.uint8)
     out_h, out_w = current.shape[:2]
 
-    if fallback_used:
+    if fallback_used and backend_name == 'opencv.resize.bicubic':
+        method_name = 'OpenCV Bicubic (fallback)'
+    elif fallback_used:
         method_name = 'Resize+Enhance (fallback)'
+    elif backend_name == 'realesrgan':
+        method_name = 'Real-ESRGAN'
     elif backend_name == 'nunif.waifu2x':
         method_name = 'NUNIF waifu2x'
     else:
-        method_name = 'NUNIF'
+        method_name = 'OpenCV'
 
     return current, {
         'method': method_name,
@@ -620,86 +860,59 @@ def _enhance_pipeline(image_bgr: np.ndarray, settings: dict | None = None, progr
 
     s = _normalize_settings(settings)
 
-    denoise_h = int(5 + (s['denoise'] * 0.16))
-    denoise_chroma = int(4 + (s['denoise'] * 0.13))
-    clahe_clip = 1.6 + (s['contrast'] * 0.035)
-    gamma = 1.15 + (s['brightness'] * 0.01)
-    sharpen_amount = 0.22 + (s['sharpness'] * 0.014)
-    detail_mix = 0.1 + (s['sharpness'] * 0.003)
-    color_factor = 1.05 + (s['contrast'] * 0.006)
-    contrast_factor = 1.03 + (s['contrast'] * 0.0025)
-    brightness_factor = 0.92 + (s['brightness'] * 0.006)
-    image_pixels = int(image_bgr.shape[0]) * int(image_bgr.shape[1])
-
-    _emit(progress_callback, 'denoise', 'running')
-    fast_path = ENHANCEMENT_FAST_MODE and image_pixels >= ENHANCEMENT_FAST_PIXELS
-    if fast_path:
-        # Faster denoise path for larger images to keep pipeline latency low.
-        sigma_color = 24 + (s['denoise'] * 0.42)
-        denoised = cv2.bilateralFilter(image_bgr, d=5, sigmaColor=sigma_color, sigmaSpace=22)
-    else:
-        pre_smoothed = cv2.bilateralFilter(image_bgr, d=5, sigmaColor=40, sigmaSpace=40)
-        denoised = cv2.fastNlMeansDenoisingColored(pre_smoothed, None, denoise_h, denoise_chroma, 7, 21)
-    _emit(progress_callback, 'denoise', 'done')
-
+    # Night Shield fix: Stage 1 — brighten low-light frames before denoise/upscale.
+    _emit(progress_callback, 'gamma', 'running')
     _emit(progress_callback, 'contrast', 'running')
-    lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8, 8))
-    l_enhanced = clahe.apply(l_channel)
-
-    lift_gamma = max(0.45, 0.88 - (s['brightness'] * 0.0035))
-    shadow_lut = np.array([
-        ((i / 255.0) ** lift_gamma) * 255.0
-        for i in range(256)
-    ]).astype('uint8')
-    l_balanced = cv2.LUT(l_enhanced, shadow_lut)
-
-    lab_enhanced = cv2.merge([l_balanced, a_channel, b_channel])
-    contrast_enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
-    contrast_enhanced = exposure.rescale_intensity(
-        contrast_enhanced,
-        in_range='image',
-        out_range=(0, 255)
-    ).astype(np.uint8)
+    brightened_bgr = brighten_lowlight(image_bgr)
+    _emit(progress_callback, 'gamma', 'done')
     _emit(progress_callback, 'contrast', 'done')
 
-    _emit(progress_callback, 'gamma', 'running')
-    lut = _build_gamma_lut(gamma)
-    gamma_corrected = cv2.LUT(contrast_enhanced, lut)
-    _emit(progress_callback, 'gamma', 'done')
+    # Night Shield fix: Stage 2 — denoise after brightening (toggle via ENABLE_DENOISE).
+    _emit(progress_callback, 'denoise', 'running')
+    if str(os.getenv('ENABLE_DENOISE', '1')).strip() == '1':
+        stage2_bgr = denoise(brightened_bgr)
+    else:
+        stage2_bgr = brightened_bgr
+    _emit(progress_callback, 'denoise', 'done')
 
-    _emit(progress_callback, 'sharpen', 'running')
-    blurred = cv2.GaussianBlur(gamma_corrected, (0, 0), sigmaX=1.0)
-    sharpened = cv2.addWeighted(gamma_corrected, 1.0 + sharpen_amount, blurred, -sharpen_amount, 0)
-    detail_map = cv2.subtract(gamma_corrected, blurred)
-    sharpened = cv2.addWeighted(sharpened, 1.0, detail_map, detail_mix, 0)
-    sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+    # Night Shield fix: Keep legacy progress keys complete even though these stages are no-ops now.
     _emit(progress_callback, 'sharpen', 'done')
-
-    _emit(progress_callback, 'color', 'running')
-    pil_img = Image.fromarray(cv2.cvtColor(sharpened, cv2.COLOR_BGR2RGB))
-    color_boosted = ImageEnhance.Color(pil_img).enhance(color_factor)
-    contrast_boosted = ImageEnhance.Contrast(color_boosted).enhance(contrast_factor)
-    brightened = ImageEnhance.Brightness(contrast_boosted).enhance(brightness_factor)
-    final = brightened.filter(
-        ImageFilter.UnsharpMask(radius=1.8, percent=int(110 + s['sharpness']), threshold=2)
-    )
     _emit(progress_callback, 'color', 'done')
 
+    # Night Shield fix: Stage 3 — run super-resolution last on pre-brightened image.
     _emit(progress_callback, 'upscale', 'running')
-    enhanced_bgr = cv2.cvtColor(np.array(final.convert('RGB')), cv2.COLOR_RGB2BGR)
-    upscaled_bgr, upscale_meta = _super_resolve_bgr(
-        enhanced_bgr,
-        target_scale=int(s['upscale_scale']),
-        denoise_strength=s['denoise'],
-        sharpness_strength=s['sharpness'],
-        fidelity_strength=s['upscale'],
-    )
-    final = Image.fromarray(cv2.cvtColor(upscaled_bgr, cv2.COLOR_BGR2RGB))
-
+    engine_mode = _superres_engine_mode()
+    if engine_mode == 'none':
+        upscaled_bgr = stage2_bgr.copy()
+        out_h, out_w = upscaled_bgr.shape[:2]
+        upscale_meta = {
+            'method': 'No Upscaling',
+            'scale': 1,
+            'backend': 'none',
+            'device': 'cpu',
+            'passes': 0,
+            'output_width': int(out_w),
+            'output_height': int(out_h),
+            'models': [],
+            'model_names': [],
+            'fallback_used': False,
+            'fallback_reason': '',
+            'package': '',
+            'package_version': '',
+            'package_source': '',
+            'package_commit': '',
+        }
+    else:
+        upscaled_bgr, upscale_meta = _super_resolve_bgr(
+            stage2_bgr,
+            target_scale=int(s['upscale_scale']),
+            denoise_strength=s['denoise'],
+            sharpness_strength=s['sharpness'],
+            fidelity_strength=s['upscale'],
+        )
     _emit(progress_callback, 'upscale', 'done')
 
+    final = Image.fromarray(cv2.cvtColor(upscaled_bgr, cv2.COLOR_BGR2RGB))
     return final, s, upscale_meta
 
 
@@ -714,8 +927,33 @@ def enhance_image_with_meta(image_bgr: np.ndarray, settings: dict | None = None)
 
 
 def enhance_image(image_bgr: np.ndarray, settings: dict | None = None) -> np.ndarray:
-    enhanced_bgr, _, _ = enhance_image_with_meta(image_bgr, settings=settings)
-    return enhanced_bgr
+    if image_bgr is None or image_bgr.size == 0:
+        raise ValueError('Input image is empty')
+
+    s = _normalize_settings(settings)
+
+    # Night Shield fix: Stage 1 — brighten low-light image first.
+    stage1_bgr = brighten_lowlight(image_bgr)
+
+    # Night Shield fix: Stage 2 — denoise after brightening when enabled.
+    if str(os.getenv('ENABLE_DENOISE', '1')).strip() == '1':
+        stage2_bgr = denoise(stage1_bgr)
+    else:
+        stage2_bgr = stage1_bgr
+
+    # Night Shield fix: Stage 3 — apply super-resolution as the final step.
+    engine_mode = _superres_engine_mode()
+    if engine_mode in ('realesrgan', 'nunif.waifu2x'):
+        upscaled_bgr, _ = _super_resolve_bgr(
+            stage2_bgr,
+            target_scale=int(s['upscale_scale']),
+            denoise_strength=s['denoise'],
+            sharpness_strength=s['sharpness'],
+            fidelity_strength=s['upscale'],
+        )
+        return upscaled_bgr
+
+    return stage2_bgr
 
 
 def generate_comparison(original_path: str, enhanced_img: Image.Image) -> Image.Image:
@@ -767,7 +1005,8 @@ def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, s
     resolution_gain = int(max(0, ((enhanced_img.width * enhanced_img.height) / max(1, orig.shape[1] * orig.shape[0]) - 1) * 100))
 
     resolved_scale = int((upscale_meta or {}).get('scale', s.get('upscale_scale', 4)))
-    resolved_method = str((upscale_meta or {}).get('method', 'NUNIF waifu2x'))
+    # Night Shield fix: Default metadata labels to Real-ESRGAN unless another backend was used.
+    resolved_method = str((upscale_meta or {}).get('method', 'Real-ESRGAN'))
     resolved_backend = str((upscale_meta or {}).get('backend', 'unknown'))
     package_version = str((upscale_meta or {}).get('package_version', '')).strip()
     package_commit = str((upscale_meta or {}).get('package_commit', '')).strip()
@@ -784,12 +1023,21 @@ def calculate_enhancement_stats(original_path: str, enhanced_img: Image.Image, s
         commit_label = f' @{package_commit}' if package_commit else ''
         model_label = f' ({model_summary})' if model_summary else ''
         super_resolution_label = f'NUNIF waifu2x{version_label}{commit_label}{model_label} x{resolved_scale}'
+    elif resolved_backend.startswith('realesrgan'):
+        model_label = f' ({model_summary})' if model_summary else ''
+        super_resolution_label = f'Real-ESRGAN{model_label} x{resolved_scale}'
+    elif resolved_backend == 'none':
+        super_resolution_label = 'No Upscaling'
 
     upscale_engine_label = resolved_backend
     if resolved_backend.startswith('nunif'):
         upscale_engine_label = f'nunif.waifu2x {package_version or "master"}'
         if package_commit:
             upscale_engine_label = f'{upscale_engine_label} ({package_commit})'
+    elif resolved_backend.startswith('realesrgan'):
+        upscale_engine_label = 'realesrgan'
+    elif resolved_backend == 'none':
+        upscale_engine_label = 'none'
 
     return {
         'brightness_increase': f'+{brightness_delta}',

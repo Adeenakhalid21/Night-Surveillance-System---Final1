@@ -423,6 +423,22 @@ $env:YOLO_MODEL_PATH = "yolov8s.pt"  # small model (balanced)
 $env:YOLO_MODEL_PATH = "runs\detect\anomaly_eval15\weights\best.pt"  # trained model
 ```
 
+#### Recommended Hugging Face Detector (Grounding DINO)
+```powershell
+# Use HF detector as primary backend
+$env:DETECTION_BACKEND = "hf"
+$env:HF_DETECTOR_TASK = "zero-shot-object-detection"
+$env:HF_OBJECT_DETECTION_MODEL = "IDEA-Research/grounding-dino-base"
+
+# Optional confidence tuning
+$env:HF_ZERO_SHOT_THRESHOLD = "0.30"
+$env:HF_ZERO_SHOT_POST_CONF_MIN = "0.30"
+$env:HF_ZERO_SHOT_MAX_LABELS = "28"
+
+# Keep this enabled to allow class-specific YOLO assist models to contribute
+$env:HF_AUGMENT_WITH_YOLO = "1"
+```
+
 #### Anomaly Detection Configuration
 ```powershell
 # Enable anomaly alerts

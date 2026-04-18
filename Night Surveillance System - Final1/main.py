@@ -13,13 +13,15 @@ from enhancement import (
     enhance_image_with_meta,
     enhance_night_image,
     enhancement_stage_keys,
+    superres_backend_name,
 )
 import random
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
+import queue
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -41,6 +43,22 @@ def _resolve_local_path(path_value: str) -> str:
     if os.path.isabs(path_value):
         return path_value
     return os.path.join(BASE_DIR, path_value)
+
+
+# Night Shield fix: Allow model references to be either local files or remote model IDs/URLs.
+def _resolve_model_reference(reference_value: str) -> str:
+    raw_value = str(reference_value or '').strip()
+    if not raw_value:
+        return ''
+
+    if raw_value.lower().startswith(('http://', 'https://', 'hf://')):
+        return raw_value
+
+    resolved_local = _resolve_local_path(raw_value)
+    if os.path.exists(resolved_local):
+        return resolved_local
+
+    return raw_value
 
 # Lazy-load YOLO to avoid import issues blocking app startup
 def _resolve_weights_from_env_or_candidates(env_name: str, fallback_candidates: list[str]) -> str:
@@ -82,6 +100,15 @@ weapon_weights_path = _resolve_weights_from_env_or_candidates(
     ],
 )
 
+# Night Shield fix: Use WEAPON_MODEL_PATH when provided, otherwise fall back to a HF weapon model.
+WEAPON_MODEL_DEFAULT_ID = 'keremberke/yolov8n-weapon-detection'
+weapon_model_path = _resolve_model_reference((os.getenv('WEAPON_MODEL_PATH') or '').strip())
+if not weapon_model_path:
+    weapon_model_path = weapon_weights_path or WEAPON_MODEL_DEFAULT_ID
+
+# Keep this legacy variable name for compatibility with existing scripts and diagnostics.
+weapon_weights_path = weapon_model_path
+
 if not general_weights_path:
     general_weights_path = "yolov8n.pt"
 
@@ -104,12 +131,18 @@ if not phone_weights_path:
 model = None
 weapon_model = None
 phone_model = None
-HF_BACKEND_ALIASES = {'hf', 'transformers', 'huggingface'}
-DETECTION_BACKEND = (os.getenv('DETECTION_BACKEND', 'ultralytics') or 'ultralytics').strip().lower()
-HF_OBJECT_DETECTION_MODEL_ID = (os.getenv('HF_OBJECT_DETECTION_MODEL', 'ciasimbaya/ObjectDetection') or 'ciasimbaya/ObjectDetection').strip()
+HF_BACKEND_ALIASES = {'hf', 'transformers', 'huggingface', 'groundingdino', 'grounding-dino'}
+DETECTION_BACKEND = (os.getenv('DETECTION_BACKEND', 'hf') or 'hf').strip().lower()
+# Night Shield fix: Allow disabling the dedicated weapon model lane when required.
+ENABLE_WEAPON_MODEL = str(os.getenv('ENABLE_WEAPON_MODEL', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+HF_OBJECT_DETECTION_MODEL_ID = (os.getenv('HF_OBJECT_DETECTION_MODEL', 'IDEA-Research/grounding-dino-base') or 'IDEA-Research/grounding-dino-base').strip()
+HF_DETECTOR_TASK = (os.getenv('HF_DETECTOR_TASK', 'zero-shot-object-detection') or 'zero-shot-object-detection').strip().lower()
+HF_ZERO_SHOT_LABELS_RAW = (os.getenv('HF_ZERO_SHOT_LABELS', '') or '').strip()
 hf_detector_pipe = None
 hf_image_processor = None
 hf_object_model = None
+hf_detector_task_resolved = 'object-detection'
+hf_candidate_labels_cache = None
 hf_backend_failed = False
 
 def get_model():
@@ -132,6 +165,9 @@ def get_model():
 
 def get_weapon_model():
     global weapon_model
+    # Night Shield fix: Respect explicit runtime switch for the dedicated weapon detector.
+    if not ENABLE_WEAPON_MODEL:
+        return None
     if not weapon_weights_path:
         return None
     if weapon_model is not None:
@@ -171,7 +207,7 @@ def get_phone_model():
 
 
 def get_hf_detector_pipe():
-    global hf_detector_pipe, hf_image_processor, hf_object_model, hf_backend_failed
+    global hf_detector_pipe, hf_image_processor, hf_object_model, hf_backend_failed, hf_detector_task_resolved
 
     if hf_backend_failed:
         return None
@@ -183,22 +219,40 @@ def get_hf_detector_pipe():
         from transformers import pipeline, AutoImageProcessor, AutoModelForObjectDetection
 
         device = 0 if torch.cuda.is_available() else -1
-        print(f"[HF] Loading object-detection model from {HF_OBJECT_DETECTION_MODEL_ID}...", flush=True)
+        requested_task = str(HF_DETECTOR_TASK or 'zero-shot-object-detection').strip().lower().replace('_', '-')
+        if requested_task in {'zero-shot-object-detection', 'zero-shot-detection', 'grounding-dino', 'groundingdino'}:
+            hf_detector_task_resolved = 'zero-shot-object-detection'
+        else:
+            hf_detector_task_resolved = 'object-detection'
 
-        hf_image_processor = AutoImageProcessor.from_pretrained(HF_OBJECT_DETECTION_MODEL_ID)
-        hf_object_model = AutoModelForObjectDetection.from_pretrained(HF_OBJECT_DETECTION_MODEL_ID)
-        try:
+        print(
+            f"[HF] Loading {hf_detector_task_resolved} model from {HF_OBJECT_DETECTION_MODEL_ID}...",
+            flush=True,
+        )
+
+        if hf_detector_task_resolved == 'zero-shot-object-detection':
             hf_detector_pipe = pipeline(
-                'object-detection',
-                model=hf_object_model,
-                image_processor=hf_image_processor,
+                'zero-shot-object-detection',
+                model=HF_OBJECT_DETECTION_MODEL_ID,
                 device=device,
             )
-        except TypeError:
-            # Backward-compatible fallback for older transformers pipeline signatures.
-            hf_detector_pipe = pipeline('object-detection', model=HF_OBJECT_DETECTION_MODEL_ID, device=device)
+            hf_image_processor = None
+            hf_object_model = None
+        else:
+            hf_image_processor = AutoImageProcessor.from_pretrained(HF_OBJECT_DETECTION_MODEL_ID)
+            hf_object_model = AutoModelForObjectDetection.from_pretrained(HF_OBJECT_DETECTION_MODEL_ID)
+            try:
+                hf_detector_pipe = pipeline(
+                    'object-detection',
+                    model=hf_object_model,
+                    image_processor=hf_image_processor,
+                    device=device,
+                )
+            except TypeError:
+                # Backward-compatible fallback for older transformers pipeline signatures.
+                hf_detector_pipe = pipeline('object-detection', model=HF_OBJECT_DETECTION_MODEL_ID, device=device)
 
-        print("[HF] Object-detection model ready", flush=True)
+        print(f"[HF] {hf_detector_task_resolved} model ready", flush=True)
         return hf_detector_pipe
     except KeyboardInterrupt:
         print("[HF] Model load interrupted")
@@ -210,6 +264,60 @@ def get_hf_detector_pipe():
         return None
 
 
+def _clean_hf_label(raw_label: str) -> str:
+    cleaned = re.sub(r'[^a-zA-Z0-9\s_-]', ' ', str(raw_label or '').strip().lower())
+    cleaned = cleaned.replace('_', ' ').replace('-', ' ')
+    return ' '.join(cleaned.split())
+
+
+def _hf_prompt_for_class(class_name: str) -> str:
+    normalized = _normalize_label(class_name)
+    prompt_aliases = {
+        'phone': 'cell phone',
+        'gun': 'firearm',
+        'tv': 'television',
+    }
+    return prompt_aliases.get(normalized, normalized)
+
+
+def _hf_zero_shot_candidate_labels() -> list[str]:
+    global hf_candidate_labels_cache
+    if hf_candidate_labels_cache is not None:
+        return list(hf_candidate_labels_cache)
+
+    labels = []
+    if HF_ZERO_SHOT_LABELS_RAW:
+        labels = [chunk.strip() for chunk in HF_ZERO_SHOT_LABELS_RAW.split(',') if chunk.strip()]
+    else:
+        merged = set()
+        for source in (DESIRED_CLASSES, IMPORTANT_CLASSES, ANOMALY_CLASSES):
+            for label in source:
+                normalized = _normalize_label(label)
+                if not normalized or normalized in {'*', 'all'}:
+                    continue
+                merged.add(normalized)
+
+        merged.update({'person', 'cell phone', 'firearm', 'knife'})
+        labels = sorted(merged)
+
+    prompts = []
+    seen = set()
+    max_labels = max(8, min(64, int(HF_ZERO_SHOT_MAX_LABELS)))
+
+    for raw in labels:
+        prompt = _hf_prompt_for_class(raw)
+        key = _normalize_label(prompt)
+        if not key or key in seen:
+            continue
+        prompts.append(prompt)
+        seen.add(key)
+        if len(prompts) >= max_labels:
+            break
+
+    hf_candidate_labels_cache = list(prompts)
+    return prompts
+
+
 def _run_hf_detection_inference(frame):
     hf_pipe = get_hf_detector_pipe()
     if hf_pipe is None:
@@ -218,26 +326,44 @@ def _run_hf_detection_inference(frame):
     try:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(rgb)
-        raw = hf_pipe(pil_image, threshold=max(0.01, min(0.95, HF_DETECTION_THRESHOLD)))
+
+        if hf_detector_task_resolved == 'zero-shot-object-detection':
+            candidate_labels = _hf_zero_shot_candidate_labels()
+            if not candidate_labels:
+                return []
+
+            threshold = max(0.01, min(0.95, HF_ZERO_SHOT_THRESHOLD))
+            try:
+                raw = hf_pipe(
+                    pil_image,
+                    candidate_labels=candidate_labels,
+                    threshold=threshold,
+                )
+            except TypeError:
+                raw = hf_pipe(pil_image, candidate_labels=candidate_labels)
+        else:
+            raw = hf_pipe(pil_image, threshold=max(0.01, min(0.95, HF_DETECTION_THRESHOLD)))
     except Exception as exc:
         print(f"[HF] Inference failed: {exc}")
         return None
 
+    post_conf_threshold = HF_ZERO_SHOT_POST_CONF_MIN if hf_detector_task_resolved == 'zero-shot-object-detection' else HF_POST_CONF_MIN
+
     parsed = []
     for detection in raw or []:
         score = float(detection.get('score', 0.0))
-        if score < HF_POST_CONF_MIN:
+        if score < post_conf_threshold:
             continue
 
         box = detection.get('box') or {}
-        x1 = int(round(float(box.get('xmin', 0))))
-        y1 = int(round(float(box.get('ymin', 0))))
-        x2 = int(round(float(box.get('xmax', 0))))
-        y2 = int(round(float(box.get('ymax', 0))))
+        x1 = int(round(float(box.get('xmin', box.get('x_min', box.get('left', 0))))))
+        y1 = int(round(float(box.get('ymin', box.get('y_min', box.get('top', 0))))))
+        x2 = int(round(float(box.get('xmax', box.get('x_max', box.get('right', 0))))))
+        y2 = int(round(float(box.get('ymax', box.get('y_max', box.get('bottom', 0))))))
         if x2 <= x1 or y2 <= y1:
             continue
 
-        raw_label = str(detection.get('label', '')).strip()
+        raw_label = _clean_hf_label(str(detection.get('label', '')).strip())
         class_key = _normalize_label(raw_label)
         if class_key in {'pistol', 'rifle', 'shotgun', 'handgun', 'firearm'}:
             class_key = 'gun'
@@ -251,6 +377,9 @@ def _run_hf_detection_inference(frame):
             'confidence': score,
             'bbox': (x1, y1, x2, y2),
             'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
+            # Night Shield fix: Mark non-weapon-model detections explicitly for downstream anomaly logic.
+            'weapon_model_hit': False,
+            'detector': 'hf',
         })
 
     return parsed
@@ -278,6 +407,21 @@ enhancement_jobs_lock = threading.Lock()
 # Uploaded video processing sessions and summary metrics
 upload_video_sessions = {}
 upload_video_sessions_lock = threading.Lock()
+
+# Night Shield fix: Track per-camera weapon confirmation counts and cached weapon detections.
+weapon_confirmation_state = {}
+weapon_confirmation_lock = threading.Lock()
+weapon_skip_state = {}
+weapon_skip_state_lock = threading.Lock()
+
+# Night Shield fix: Shared live stream stats for /stats endpoint and dashboard polling.
+stream_stats_lock = threading.Lock()
+stream_runtime_stats = {
+    'fps': 0.0,
+    'weapon_model_enabled': bool(ENABLE_WEAPON_MODEL),
+    'superres_engine': str(superres_backend_name() or os.getenv('SUPERRES_ENGINE', 'realesrgan')).strip().lower() or 'realesrgan',
+    'last_weapon_detection': None,
+}
 
 # Initialize Flask application
 app = Flask(__name__)
@@ -412,11 +556,21 @@ DETECTION_SNAPSHOT_COOLDOWN_SEC = float(os.getenv('DETECTION_SNAPSHOT_COOLDOWN_S
 MOTION_MIN_CONTOUR_AREA = float(os.getenv('MOTION_MIN_CONTOUR_AREA', '850'))
 DETECTION_CONF_MIN = float(os.getenv('DETECTION_CONF_MIN', '0.35'))
 DETECTION_DISPLAY_CONF_MIN = float(os.getenv('DETECTION_DISPLAY_CONF_MIN', '0.22'))
-WEAPON_CONF_MIN = float(os.getenv('WEAPON_CONF_MIN', str(min(DETECTION_CONF_MIN, 0.18))))
+# Night Shield fix: Enforce a 0.50 minimum confidence floor for dedicated weapon-model detections.
+WEAPON_CONF_MIN = max(0.50, float(os.getenv('WEAPON_CONF_MIN', '0.50')))
 KNIFE_CONF_MIN = float(os.getenv('KNIFE_CONF_MIN', str(WEAPON_CONF_MIN)))
 GUN_CONF_MIN = float(os.getenv('GUN_CONF_MIN', str(WEAPON_CONF_MIN)))
+# Night Shield fix: Require N consecutive weapon frames before anomaly/alert actions are allowed.
+WEAPON_CONFIRM_FRAMES = max(1, int(float(os.getenv('WEAPON_CONFIRM_FRAMES', '4'))))
+# Night Shield fix: Run weapon detector every Nth frame to reduce CPU load.
+WEAPON_FRAME_SKIP = max(1, int(float(os.getenv('WEAPON_FRAME_SKIP', '5'))))
+# Night Shield fix: Treat sub-1% frame-area weapon boxes as noise.
+WEAPON_MIN_BOX_AREA_RATIO = 0.01
 HF_DETECTION_THRESHOLD = float(os.getenv('HF_DETECTION_THRESHOLD', str(DETECTION_CONF_MIN)))
 HF_POST_CONF_MIN = float(os.getenv('HF_POST_CONF_MIN', str(min(DETECTION_CONF_MIN, HF_DETECTION_THRESHOLD, 0.18))))
+HF_ZERO_SHOT_THRESHOLD = float(os.getenv('HF_ZERO_SHOT_THRESHOLD', str(max(0.25, HF_DETECTION_THRESHOLD))))
+HF_ZERO_SHOT_POST_CONF_MIN = float(os.getenv('HF_ZERO_SHOT_POST_CONF_MIN', str(max(0.25, HF_POST_CONF_MIN))))
+HF_ZERO_SHOT_MAX_LABELS = max(8, min(64, int(float(os.getenv('HF_ZERO_SHOT_MAX_LABELS', '28')))))
 HF_AUGMENT_WITH_YOLO = str(os.getenv('HF_AUGMENT_WITH_YOLO', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
 HF_FUSION_INCLUDE_GENERAL = str(os.getenv('HF_FUSION_INCLUDE_GENERAL', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 STREAM_DETECTION_BACKEND = (os.getenv('STREAM_DETECTION_BACKEND', 'ultralytics') or 'ultralytics').strip().lower()
@@ -430,6 +584,11 @@ DETECTION_LANE_WORKERS = max(1, min(3, int(float(os.getenv('DETECTION_LANE_WORKE
 ENABLE_DETECTION_SIDE_EFFECTS = str(os.getenv('ENABLE_DETECTION_SIDE_EFFECTS', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 SAVE_DETECTION_FRAMES = str(os.getenv('SAVE_DETECTION_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 SAVE_ANOMALY_FRAMES = str(os.getenv('SAVE_ANOMALY_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+LOWLIGHT_DETECTION_MAX_SIDE = max(480, int(float(os.getenv('LOWLIGHT_DETECTION_MAX_SIDE', '1280'))))
+LOWLIGHT_FUSION_IOU = float(os.getenv('LOWLIGHT_FUSION_IOU', '0.45'))
+LOWLIGHT_FUSION_CONF_BOOST = float(os.getenv('LOWLIGHT_FUSION_CONF_BOOST', '0.06'))
+LOWLIGHT_PRIMARY_ACCEPT_CONF = float(os.getenv('LOWLIGHT_PRIMARY_ACCEPT_CONF', '0.46'))
+LOWLIGHT_REFERENCE_HIGH_CONF = float(os.getenv('LOWLIGHT_REFERENCE_HIGH_CONF', '0.58'))
 
 DESIRED_CLASSES = _parse_label_set(os.getenv(
     'DESIRED_CLASSES',
@@ -440,7 +599,7 @@ DESIRED_CLASSES = _parse_label_set(os.getenv(
 }
 DETECTION_MATCH_ALL = bool(DESIRED_CLASSES.intersection({'*', 'all'}))
 PERSON_LANE_CLASSES = {'person'}
-WEAPON_LANE_CLASSES = {'knife', 'gun', 'weapon', 'pistol', 'rifle'}
+WEAPON_LANE_CLASSES = {'knife', 'gun', 'weapon', 'pistol', 'rifle', 'shotgun', 'handgun', 'firearm'}
 _lane_worker_count = max(1, DETECTION_LANE_WORKERS)
 detection_lane_pool = ThreadPoolExecutor(max_workers=_lane_worker_count, thread_name_prefix='det-lane')
 
@@ -509,11 +668,12 @@ def _is_anomaly_target(class_name: str) -> bool:
     return normalized in ANOMALY_CLASSES
 
 
-def _enqueue_anomaly_event(class_name: str, confidence: float, camera_id: int = 1) -> bool:
+def _enqueue_anomaly_event(class_name: str, confidence: float, camera_id: int = 1, force: bool = False) -> bool:
     if not ENABLE_ANOMALY_ALERTS:
         return False
 
-    if not _is_anomaly_target(class_name):
+    # Night Shield fix: Allow forced anomaly events for detections originating from the weapon model.
+    if not force and not _is_anomaly_target(class_name):
         return False
 
     now = time.time()
@@ -545,6 +705,122 @@ def _allow_with_cooldown(bucket: dict, key: str, cooldown_sec: float) -> bool:
             return False
         bucket[key] = now
         return True
+
+
+# Night Shield fix: Generate UTC ISO timestamp strings for stream stats.
+def _utc_iso_now() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+
+
+# Night Shield fix: Centralized thread-safe stats updates consumed by /stats.
+def _update_stream_stats(fps: float | None = None, last_weapon_detection: str | None = None) -> None:
+    with stream_stats_lock:
+        if fps is not None:
+            stream_runtime_stats['fps'] = max(0.0, float(fps))
+        if last_weapon_detection is not None:
+            stream_runtime_stats['last_weapon_detection'] = str(last_weapon_detection)
+        stream_runtime_stats['weapon_model_enabled'] = bool(ENABLE_WEAPON_MODEL)
+
+
+# Night Shield fix: Weapon confidence tiers drive color coding and side-effects.
+def _weapon_confidence_tier(confidence: float) -> str:
+    value = float(confidence)
+    if value >= 0.75:
+        return 'high'
+    if value >= 0.50:
+        return 'medium'
+    return 'low'
+
+
+# Night Shield fix: Stream overlay colors for weapon confidence tiers.
+def _weapon_tier_color_bgr(tier: str) -> tuple[int, int, int]:
+    normalized = str(tier or '').strip().lower()
+    if normalized == 'high':
+        return (0, 0, 255)      # red
+    if normalized == 'medium':
+        return (0, 165, 255)    # orange
+    return (0, 255, 255)        # yellow
+
+
+# Night Shield fix: Side-effect policy for weapon confidence tiers.
+def _weapon_tier_policy(tier: str) -> dict:
+    normalized = str(tier or '').strip().lower()
+    if normalized == 'high':
+        return {
+            'save_db': True,
+            'save_snapshot': True,
+            'event_log': True,
+            'send_email': True,
+            'severity': 'high',
+        }
+    if normalized == 'medium':
+        return {
+            'save_db': True,
+            'save_snapshot': True,
+            'event_log': True,
+            'send_email': False,
+            'severity': 'medium',
+        }
+    return {
+        'save_db': True,
+        'save_snapshot': False,
+        'event_log': False,
+        'send_email': False,
+        'severity': 'low',
+    }
+
+
+# Night Shield fix: Update per-camera consecutive weapon label counts and reset on empty weapon frames.
+def _annotate_weapon_confirmation(detections: list[dict], camera_id: int = 1) -> list[dict]:
+    camera_key = int(camera_id)
+    fresh_weapon_labels = {
+        _normalize_label(det.get('class', ''))
+        for det in (detections or [])
+        if _lane_name_for_class(det.get('class', '')) == 'weapon' and not bool(det.get('weapon_cached', False))
+    }
+    fresh_weapon_labels.discard('')
+
+    has_weapon_detection = any(
+        _lane_name_for_class(det.get('class', '')) == 'weapon'
+        for det in (detections or [])
+    )
+
+    with weapon_confirmation_lock:
+        camera_counts = weapon_confirmation_state.setdefault(camera_key, {})
+        if fresh_weapon_labels:
+            for existing_label in list(camera_counts.keys()):
+                if existing_label not in fresh_weapon_labels:
+                    camera_counts.pop(existing_label, None)
+
+            for label in fresh_weapon_labels:
+                camera_counts[label] = int(camera_counts.get(label, 0)) + 1
+
+            resolved_counts = dict(camera_counts)
+        elif not has_weapon_detection:
+            weapon_confirmation_state[camera_key] = {}
+            resolved_counts = {}
+        else:
+            # Keep existing counts on cache-only frames; do not increment.
+            resolved_counts = dict(camera_counts)
+
+    required_frames = max(1, int(WEAPON_CONFIRM_FRAMES))
+    for detection in detections or []:
+        if _lane_name_for_class(detection.get('class', '')) != 'weapon':
+            detection['weapon_confirm_count'] = 0
+            detection['weapon_confirmed'] = False
+            continue
+
+        class_key = _normalize_label(detection.get('class', ''))
+        confirm_count = int(resolved_counts.get(class_key, 0))
+        detection['weapon_confirm_count'] = confirm_count
+        detection['weapon_confirmed'] = confirm_count >= required_frames
+
+    return detections
+
+
+# Night Shield fix: Persist last confirmed weapon detection timestamp for lightweight /stats polling.
+def _mark_weapon_detection_timestamp() -> None:
+    _update_stream_stats(last_weapon_detection=_utc_iso_now())
 
 
 def _trim_graph_series(series: list, limit: int = UPLOAD_VIDEO_GRAPH_POINTS) -> None:
@@ -907,12 +1183,29 @@ class SimpleObjectTracker:
         return active
 
 
-def _run_detection_inference(frame, backend_override: str | None = None):
+def _run_detection_inference(
+    frame,
+    backend_override: str | None = None,
+    camera_id: int = 1,
+    allow_weapon_skip: bool = False,
+    frame_seq: int | None = None,
+):
     active_backend = str(backend_override or DETECTION_BACKEND or 'ultralytics').strip().lower()
     if active_backend in {'default', 'same', 'app'}:
         active_backend = DETECTION_BACKEND
 
-    def _parse_boxes(active_model, active_results, phone_only: bool = False, weapon_only: bool = False):
+    frame_h, frame_w = frame.shape[:2]
+    frame_area = max(1, int(frame_h * frame_w))
+    min_weapon_bbox_area = max(1, int(frame_area * WEAPON_MIN_BOX_AREA_RATIO))
+
+    def _parse_boxes(
+        active_model,
+        active_results,
+        phone_only: bool = False,
+        weapon_only: bool = False,
+        detector_tag: str = 'general',
+        weapon_cached: bool = False,
+    ):
         out = []
         if not active_model or not active_results:
             return out
@@ -935,6 +1228,9 @@ def _run_detection_inference(frame, backend_override: str | None = None):
                 else:
                     required_conf = WEAPON_CONF_MIN
 
+                # Night Shield fix: Never allow weapon-lane confidence below 0.50 even if env overrides are lower.
+                required_conf = max(0.50, float(required_conf))
+
             if conf < required_conf:
                 continue
 
@@ -949,14 +1245,36 @@ def _run_detection_inference(frame, backend_override: str | None = None):
 
             if class_key in {'pistol', 'rifle', 'shotgun', 'handgun', 'firearm'}:
                 class_name = 'gun'
+                class_key = 'gun'
             elif class_key == 'phone':
                 class_name = 'phone'
 
+            bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
+            if weapon_only and bbox_area < min_weapon_bbox_area:
+                # Night Shield fix: Drop tiny weapon boxes below 1% frame area to reduce distant false positives.
+                continue
+
+            if weapon_only:
+                bbox_w = max(1, x2 - x1)
+                bbox_h = max(1, y2 - y1)
+                bbox_aspect_ratio = float(bbox_h) / float(bbox_w)
+                # Night Shield fix: Filter very tall, narrow boxes (e.g., hangers/curtains) that cause weapon false positives.
+                if bbox_aspect_ratio > 4.0:
+                    continue
+
+            weapon_tier = _weapon_confidence_tier(conf) if weapon_only else ''
             out.append({
                 'class': class_name,
                 'confidence': conf,
                 'bbox': (x1, y1, x2, y2),
-                'bbox_area': max(0, x2 - x1) * max(0, y2 - y1),
+                'bbox_area': bbox_area,
+                # Night Shield fix: Preserve detection provenance for anomaly and rendering behavior.
+                'weapon_model_hit': bool(weapon_only),
+                'weapon_cached': bool(weapon_only and weapon_cached),
+                'weapon_tier': weapon_tier,
+                'weapon_confirm_count': 0,
+                'weapon_confirmed': False,
+                'detector': detector_tag,
             })
         return out
 
@@ -964,6 +1282,7 @@ def _run_detection_inference(frame, backend_override: str | None = None):
         merged = list(base)
         for new_det in incoming:
             replace_idx = None
+            new_is_weapon_hit = bool(new_det.get('weapon_model_hit'))
             for idx, existing in enumerate(merged):
                 if _normalize_label(existing.get('class', '')) != _normalize_label(new_det.get('class', '')):
                     continue
@@ -973,9 +1292,30 @@ def _run_detection_inference(frame, backend_override: str | None = None):
 
             if replace_idx is None:
                 merged.append(new_det)
-            elif float(new_det.get('confidence', 0.0)) > float(merged[replace_idx].get('confidence', 0.0)):
-                merged[replace_idx] = new_det
+            else:
+                existing = merged[replace_idx]
+                existing_is_weapon_hit = bool(existing.get('weapon_model_hit'))
+
+                # Night Shield fix: Keep weapon-model hits when overlap occurs so anomaly routing stays reliable.
+                if existing_is_weapon_hit and not new_is_weapon_hit:
+                    continue
+                if new_is_weapon_hit and not existing_is_weapon_hit:
+                    merged[replace_idx] = new_det
+                    continue
+
+                if float(new_det.get('confidence', 0.0)) > float(existing.get('confidence', 0.0)):
+                    merged[replace_idx] = new_det
         return merged
+
+    # Night Shield fix: Execute YOLO inference calls concurrently for the enabled model lanes.
+    def _infer_with_model(active_model, model_tag: str):
+        if active_model is None:
+            return None
+        try:
+            return active_model(frame, verbose=False)
+        except Exception as exc:
+            print(f"[YOLO] {model_tag} model inference failed: {exc}")
+            return None
 
     parsed = []
     hf_active = False
@@ -995,32 +1335,98 @@ def _run_detection_inference(frame, backend_override: str | None = None):
     if include_general and general_m is None and not parsed:
         return []
 
-    general_results = None
-    if general_m is not None:
-        try:
-            general_results = general_m(frame, verbose=False)
-        except Exception as e:
-            print(f"[YOLO] general model inference failed: {e}")
-
-    weapon_m = get_weapon_model()
-    weapon_results = None
-    if weapon_m is not None and weapon_m is not general_m:
-        try:
-            weapon_results = weapon_m(frame, verbose=False)
-        except Exception as e:
-            print(f"[YOLO] weapon model inference failed: {e}")
-
+    weapon_m = get_weapon_model() if ENABLE_WEAPON_MODEL else None
     phone_m = get_phone_model()
-    phone_results = None
-    if phone_m is not None and phone_m is not general_m:
-        try:
-            phone_results = phone_m(frame, verbose=False)
-        except Exception as e:
-            print(f"[YOLO] phone model inference failed: {e}")
 
-    parsed = _merge_detections(parsed, _parse_boxes(general_m, general_results, phone_only=False, weapon_only=False))
-    parsed = _merge_detections(parsed, _parse_boxes(weapon_m, weapon_results, phone_only=False, weapon_only=True))
-    parsed = _merge_detections(parsed, _parse_boxes(phone_m, phone_results, phone_only=True, weapon_only=False))
+    run_weapon_this_frame = bool(weapon_m is not None and weapon_m is not general_m)
+    cached_weapon_detections = []
+    camera_key = int(camera_id)
+    skip_mod = max(1, int(WEAPON_FRAME_SKIP))
+    if run_weapon_this_frame and allow_weapon_skip:
+        with weapon_skip_state_lock:
+            camera_state = weapon_skip_state.setdefault(camera_key, {
+                'frame_counter': 0,
+                'last_detections': [],
+                'last_seq': 0,
+            })
+            camera_state['frame_counter'] = int(camera_state.get('frame_counter', 0)) + 1
+            should_run_weapon = (camera_state['frame_counter'] % skip_mod == 0) or not camera_state.get('last_detections')
+            run_weapon_this_frame = bool(should_run_weapon)
+            if not run_weapon_this_frame:
+                cached_weapon_detections = [dict(det) for det in (camera_state.get('last_detections') or [])]
+
+    inference_targets = {}
+    if general_m is not None:
+        inference_targets['general'] = general_m
+    if run_weapon_this_frame and weapon_m is not None and weapon_m is not general_m:
+        inference_targets['weapon'] = weapon_m
+    if phone_m is not None and phone_m is not general_m:
+        inference_targets['phone'] = phone_m
+
+    inference_outputs = {'general': None, 'weapon': None, 'phone': None}
+    if len(inference_targets) > 1:
+        with ThreadPoolExecutor(max_workers=len(inference_targets), thread_name_prefix='det-infer') as infer_pool:
+            futures = {
+                name: infer_pool.submit(_infer_with_model, mdl, name)
+                for name, mdl in inference_targets.items()
+            }
+            for name, future in futures.items():
+                try:
+                    inference_outputs[name] = future.result()
+                except Exception as exc:
+                    print(f"[YOLO] {name} model inference failed: {exc}")
+                    inference_outputs[name] = None
+    else:
+        for name, mdl in inference_targets.items():
+            inference_outputs[name] = _infer_with_model(mdl, name)
+
+    parsed = _merge_detections(
+        parsed,
+        _parse_boxes(general_m, inference_outputs['general'], phone_only=False, weapon_only=False, detector_tag='general'),
+    )
+
+    weapon_detections = []
+    if run_weapon_this_frame:
+        weapon_detections = _parse_boxes(
+            weapon_m,
+            inference_outputs['weapon'],
+            phone_only=False,
+            weapon_only=True,
+            detector_tag='weapon',
+            weapon_cached=False,
+        )
+
+        if allow_weapon_skip:
+            with weapon_skip_state_lock:
+                camera_state = weapon_skip_state.setdefault(camera_key, {
+                    'frame_counter': 0,
+                    'last_detections': [],
+                    'last_seq': 0,
+                })
+                camera_state['last_detections'] = [dict(det) for det in weapon_detections]
+                camera_state['last_seq'] = int(frame_seq or 0)
+
+        if weapon_detections:
+            _mark_weapon_detection_timestamp()
+    elif cached_weapon_detections:
+        # Night Shield fix: Reuse latest weapon detections on skipped frames.
+        for cached in cached_weapon_detections:
+            cached_det = dict(cached)
+            cached_det['weapon_cached'] = True
+            cached_det['detector'] = 'weapon-cache'
+            cached_det['weapon_tier'] = str(cached_det.get('weapon_tier') or _weapon_confidence_tier(float(cached_det.get('confidence', 0.0))))
+            cached_det['weapon_confirm_count'] = int(cached_det.get('weapon_confirm_count', 0))
+            cached_det['weapon_confirmed'] = bool(cached_det.get('weapon_confirmed', False))
+            weapon_detections.append(cached_det)
+
+    parsed = _merge_detections(
+        parsed,
+        weapon_detections,
+    )
+    parsed = _merge_detections(
+        parsed,
+        _parse_boxes(phone_m, inference_outputs['phone'], phone_only=True, weapon_only=False, detector_tag='phone'),
+    )
 
     return parsed
 
@@ -1079,6 +1485,156 @@ def _count_detection_groups(detections: list[dict]) -> dict[str, int]:
     return counts
 
 
+def _prepare_lowlight_detection_frame(enhanced_bgr: np.ndarray, reference_bgr: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Build a detector-friendly view that suppresses SR artifacts while preserving low-light details."""
+    if enhanced_bgr is None or enhanced_bgr.size == 0:
+        fallback = reference_bgr.copy()
+        return fallback, 1.0, 1.0
+
+    ref_h, ref_w = reference_bgr.shape[:2]
+    detection_frame = cv2.resize(enhanced_bgr, (ref_w, ref_h), interpolation=cv2.INTER_AREA)
+
+    max_side = max(ref_h, ref_w)
+    if max_side > LOWLIGHT_DETECTION_MAX_SIDE:
+        ratio = LOWLIGHT_DETECTION_MAX_SIDE / float(max_side)
+        resized_w = max(64, int(round(ref_w * ratio)))
+        resized_h = max(64, int(round(ref_h * ratio)))
+        detection_frame = cv2.resize(detection_frame, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+
+    detection_frame = cv2.bilateralFilter(detection_frame, d=5, sigmaColor=28, sigmaSpace=12)
+    lab = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    l_channel = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8)).apply(l_channel)
+    detection_frame = cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+
+    scale_x = float(enhanced_bgr.shape[1]) / float(detection_frame.shape[1])
+    scale_y = float(enhanced_bgr.shape[0]) / float(detection_frame.shape[0])
+    return detection_frame, scale_x, scale_y
+
+
+def _dedupe_detections_same_class(detections: list[dict], iou_threshold: float = 0.52) -> list[dict]:
+    if not detections:
+        return []
+
+    ordered = sorted(detections, key=lambda d: float(d.get('confidence', 0.0)), reverse=True)
+    kept = []
+    for candidate in ordered:
+        class_key = _normalize_label(candidate.get('class', ''))
+        suppressed = False
+        for existing in kept:
+            if _normalize_label(existing.get('class', '')) != class_key:
+                continue
+            if _bbox_iou(existing.get('bbox', (0, 0, 0, 0)), candidate.get('bbox', (0, 0, 0, 0))) >= iou_threshold:
+                suppressed = True
+                break
+        if not suppressed:
+            kept.append(candidate)
+    return kept
+
+
+def _scale_detection_boxes(detections: list[dict], scale_x: float, scale_y: float, max_w: int, max_h: int) -> list[dict]:
+    if not detections:
+        return []
+
+    if abs(scale_x - 1.0) < 1e-6 and abs(scale_y - 1.0) < 1e-6:
+        return detections
+
+    scaled = []
+    for detection in detections:
+        x1, y1, x2, y2 = detection.get('bbox', (0, 0, 0, 0))
+        sx1 = int(round(float(x1) * scale_x))
+        sy1 = int(round(float(y1) * scale_y))
+        sx2 = int(round(float(x2) * scale_x))
+        sy2 = int(round(float(y2) * scale_y))
+
+        sx1 = max(0, min(max_w - 1, sx1))
+        sy1 = max(0, min(max_h - 1, sy1))
+        sx2 = max(0, min(max_w - 1, sx2))
+        sy2 = max(0, min(max_h - 1, sy2))
+
+        if sx2 <= sx1 or sy2 <= sy1:
+            continue
+
+        det_copy = dict(detection)
+        det_copy['bbox'] = (sx1, sy1, sx2, sy2)
+        det_copy['bbox_area'] = max(0, sx2 - sx1) * max(0, sy2 - sy1)
+        scaled.append(det_copy)
+
+    return scaled
+
+
+def _fuse_lowlight_detections(primary: list[dict], reference: list[dict], frame_shape: tuple[int, ...]) -> list[dict]:
+    if not primary and not reference:
+        return []
+
+    frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+    min_box_area = max(140, int(frame_h * frame_w * 0.00035))
+
+    fused = []
+    matched_reference = set()
+
+    for detection in primary or []:
+        det_copy = dict(detection)
+        class_key = _normalize_label(det_copy.get('class', ''))
+        conf = float(det_copy.get('confidence', 0.0))
+
+        x1, y1, x2, y2 = det_copy.get('bbox', (0, 0, 0, 0))
+        area = int(det_copy.get('bbox_area', max(0, x2 - x1) * max(0, y2 - y1)))
+
+        best_idx = -1
+        best_iou = 0.0
+        for idx, ref in enumerate(reference or []):
+            if idx in matched_reference:
+                continue
+            if _normalize_label(ref.get('class', '')) != class_key:
+                continue
+            iou = _bbox_iou(det_copy.get('bbox', (0, 0, 0, 0)), ref.get('bbox', (0, 0, 0, 0)))
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+
+        keep = False
+        if best_idx >= 0 and best_iou >= LOWLIGHT_FUSION_IOU:
+            ref_conf = float((reference or [])[best_idx].get('confidence', 0.0))
+            det_copy['confidence'] = min(0.99, max(conf, ref_conf) + LOWLIGHT_FUSION_CONF_BOOST)
+            matched_reference.add(best_idx)
+            keep = True
+        else:
+            lane = _lane_name_for_class(det_copy.get('class', ''))
+            if lane == 'weapon':
+                lane_min_conf = max(0.38, WEAPON_CONF_MIN + 0.06)
+            elif lane == 'person':
+                lane_min_conf = max(0.45, LOWLIGHT_PRIMARY_ACCEPT_CONF + 0.02)
+            else:
+                lane_min_conf = max(0.42, DETECTION_CONF_MIN + 0.08)
+
+            if conf >= lane_min_conf and area >= min_box_area:
+                keep = True
+            elif conf >= max(0.62, lane_min_conf + 0.10):
+                keep = True
+
+        if keep:
+            fused.append(det_copy)
+
+    for idx, ref in enumerate(reference or []):
+        if idx in matched_reference:
+            continue
+
+        ref_conf = float(ref.get('confidence', 0.0))
+        lane = _lane_name_for_class(ref.get('class', ''))
+        if lane == 'weapon':
+            min_ref_conf = max(0.42, WEAPON_CONF_MIN + 0.05)
+        elif lane == 'person':
+            min_ref_conf = 0.50
+        else:
+            min_ref_conf = LOWLIGHT_REFERENCE_HIGH_CONF
+
+        if ref_conf >= min_ref_conf:
+            fused.append(dict(ref))
+
+    return _dedupe_detections_same_class(fused, iou_threshold=0.52)
+
+
 def _collect_anomaly_detections(detections: list[dict]) -> list[dict]:
     anomalies_detected = []
     for detection in detections or []:
@@ -1086,12 +1642,31 @@ def _collect_anomaly_detections(detections: list[dict]) -> list[dict]:
         conf = float(detection['confidence'])
         class_name = detection['class']
         bbox_area = int(detection.get('bbox_area', max(0, x2 - x1) * max(0, y2 - y1)))
+        weapon_model_hit = bool(detection.get('weapon_model_hit'))
+        weapon_confirmed = bool(detection.get('weapon_confirmed', False))
+        weapon_confirm_count = int(detection.get('weapon_confirm_count', 0))
+        weapon_tier = str(detection.get('weapon_tier') or _weapon_confidence_tier(conf))
+
+        # Night Shield fix: Weapon anomalies must satisfy consecutive-frame confirmation.
+        if weapon_model_hit:
+            if not weapon_confirmed:
+                continue
+            anomalies_detected.append({
+                'class': class_name,
+                'confidence': conf,
+                'bbox': (x1, y1, x2, y2),
+                'weapon_model_hit': True,
+                'weapon_tier': weapon_tier,
+                'weapon_confirm_count': weapon_confirm_count,
+            })
+            continue
 
         if conf >= ANOMALY_CONF_MIN and bbox_area >= ANOMALY_MIN_BOX_AREA and _is_anomaly_target(class_name):
             anomalies_detected.append({
                 'class': class_name,
                 'confidence': conf,
-                'bbox': (x1, y1, x2, y2)
+                'bbox': (x1, y1, x2, y2),
+                'weapon_model_hit': False,
             })
     return anomalies_detected
 
@@ -1289,11 +1864,22 @@ def detect_anomalies(frame, camera_id=1, detections=None):
         x1, y1, x2, y2 = anomaly['bbox']
         conf = float(anomaly['confidence'])
         class_name = anomaly['class']
+        weapon_model_hit = bool(anomaly.get('weapon_model_hit'))
+        weapon_tier = str(anomaly.get('weapon_tier') or _weapon_confidence_tier(conf))
 
-        # Draw red bounding box for anomalies
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-        label = f"ANOMALY: {class_name} {conf:.2f}"
-        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        box_color = (0, 0, 255)
+        if weapon_model_hit:
+            # Night Shield fix: Keep anomaly overlay color consistent with weapon confidence tiers.
+            box_color = _weapon_tier_color_bgr(weapon_tier)
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 3)
+        # Night Shield fix: Show explicit weapon banner for weapon-model detections.
+        if weapon_model_hit:
+            tier_text = weapon_tier.upper()
+            label = f"⚠ WEAPON {tier_text}: {class_name} {conf:.2f}"
+        else:
+            label = f"ANOMALY: {class_name} {conf:.2f}"
+        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
     
     return frame, anomalies_detected
 
@@ -1315,6 +1901,14 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
     if detections is None:
         detections = _run_detection_inference(frame)
 
+    # Night Shield fix: Attach weapon confirmation metadata when caller provides raw detections.
+    needs_confirmation_annotation = any(
+        _lane_name_for_class(det.get('class', '')) == 'weapon' and 'weapon_confirmed' not in det
+        for det in (detections or [])
+    )
+    if needs_confirmation_annotation:
+        detections = _annotate_weapon_confirmation(detections, camera_id=camera_id)
+
     if not detections:
         return frame
 
@@ -1330,6 +1924,10 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
         track_id = int(detection.get('track_id', 0))
         track_hits = int(detection.get('track_hits', 1))
         track_age_sec = float(detection.get('track_age_sec', 0.0))
+        is_weapon_detection = bool(detection.get('weapon_model_hit')) or _lane_name_for_class(class_name) == 'weapon'
+        weapon_tier = str(detection.get('weapon_tier') or _weapon_confidence_tier(conf)) if is_weapon_detection else ''
+        weapon_confirmed = bool(detection.get('weapon_confirmed', not is_weapon_detection))
+        weapon_confirm_count = int(detection.get('weapon_confirm_count', 0)) if is_weapon_detection else 0
 
         if not DETECTION_MATCH_ALL and class_key not in DESIRED_CLASSES and not _is_anomaly_target(class_name):
             continue
@@ -1342,12 +1940,23 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
             continue
 
         track_suffix = f" #{track_id}" if track_id > 0 else ""
-        label = f"{class_name}{track_suffix} {conf:.2f}"
 
-        if track_age_sec > max(0.25, DETECTION_MIN_INTERVAL_SEC):
-            box_color = (0, 205, 255)
+        # Night Shield fix: Keep weapon detections visually distinct from regular detections.
+        if is_weapon_detection:
+            box_color = _weapon_tier_color_bgr(weapon_tier)
+            if weapon_confirmed:
+                label = f"⚠ WEAPON {weapon_tier.upper()} {class_name}{track_suffix} {conf:.2f}"
+            else:
+                label = (
+                    f"⚠ WEAPON PENDING {class_name}{track_suffix} {conf:.2f} "
+                    f"({weapon_confirm_count}/{WEAPON_CONFIRM_FRAMES})"
+                )
         else:
-            box_color = (0, 255, 0)
+            label = f"{class_name}{track_suffix} {conf:.2f}"
+            if track_age_sec > max(0.25, DETECTION_MIN_INTERVAL_SEC):
+                box_color = (0, 205, 255)
+            else:
+                box_color = (0, 255, 0)
 
         # Draw bounding box and label on the frame
         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
@@ -1356,70 +1965,94 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
         if not apply_side_effects:
             continue
 
-        needs_db = not DISABLE_DETECTION_DB and _allow_with_cooldown(
-            detection_last_db_emit,
-            f"{camera_id}:{class_key}",
-            DETECTION_DB_COOLDOWN_SEC,
-        )
-        needs_alert = class_key in IMPORTANT_CLASSES and conf >= ALERT_CONF_MIN and _allow_with_cooldown(
-            detection_last_alert_emit,
-            f"{camera_id}:{class_key}",
-            DETECTION_ALERT_COOLDOWN_SEC,
-        )
+        if is_weapon_detection and not weapon_confirmed:
+            # Night Shield fix: Suppress side effects until consecutive-frame weapon confirmation is reached.
+            continue
 
-        needs_snapshot = SAVE_DETECTION_FRAMES and (needs_db or needs_alert)
+        needs_db = False
+        needs_snapshot = False
+        needs_alert = False
+        needs_event_log = False
+        should_send_email = False
+        event_severity = 'medium'
         detection_image_path = None
 
-        if needs_snapshot:
-            if frame_snapshot_path is None and _allow_with_cooldown(
+        if is_weapon_detection:
+            tier_policy = _weapon_tier_policy(weapon_tier)
+            event_severity = str(tier_policy.get('severity', 'medium'))
+
+            needs_db = bool(tier_policy.get('save_db', True)) and (not DISABLE_DETECTION_DB) and _allow_with_cooldown(
+                detection_last_db_emit,
+                f"{camera_id}:{class_key}:weapon:{weapon_tier}",
+                DETECTION_DB_COOLDOWN_SEC,
+            )
+            needs_snapshot = bool(tier_policy.get('save_snapshot', False)) and _allow_with_cooldown(
                 detection_last_snapshot_emit,
-                f"{camera_id}:snapshot",
+                f"{camera_id}:snapshot:weapon:{weapon_tier}",
                 DETECTION_SNAPSHOT_COOLDOWN_SEC,
-            ):
-                if not snapshot_dir_ready:
-                    os.makedirs('static/images', exist_ok=True)
-                    snapshot_dir_ready = True
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                frame_snapshot_path = f'static/images/detection_{timestamp}.jpg'
-                try:
-                    cv2.imwrite(frame_snapshot_path, frame)
-                except Exception as e:
-                    print(f"Failed to save detection image: {e}")
-                    frame_snapshot_path = None
+            )
+            needs_alert = bool(tier_policy.get('event_log', False)) and _allow_with_cooldown(
+                detection_last_alert_emit,
+                f"{camera_id}:{class_key}:weapon-event:{weapon_tier}",
+                DETECTION_ALERT_COOLDOWN_SEC,
+            )
+            needs_event_log = needs_alert
+            should_send_email = bool(tier_policy.get('send_email', False)) and needs_alert
+        else:
+            needs_db = not DISABLE_DETECTION_DB and _allow_with_cooldown(
+                detection_last_db_emit,
+                f"{camera_id}:{class_key}",
+                DETECTION_DB_COOLDOWN_SEC,
+            )
+            needs_alert = class_key in IMPORTANT_CLASSES and conf >= ALERT_CONF_MIN and _allow_with_cooldown(
+                detection_last_alert_emit,
+                f"{camera_id}:{class_key}",
+                DETECTION_ALERT_COOLDOWN_SEC,
+            )
+            needs_snapshot = SAVE_DETECTION_FRAMES and (needs_db or needs_alert)
+            needs_event_log = needs_alert
+            should_send_email = needs_alert
 
-            detection_image_path = frame_snapshot_path
+        if needs_snapshot:
+            if not snapshot_dir_ready:
+                os.makedirs('static/images', exist_ok=True)
+                snapshot_dir_ready = True
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            frame_snapshot_path = f'static/images/detection_{timestamp}.jpg'
+            try:
+                cv2.imwrite(frame_snapshot_path, frame)
+                detection_image_path = frame_snapshot_path
+            except Exception as e:
+                print(f"Failed to save detection image: {e}")
+                detection_image_path = None
 
-            # Optionally store detection rows (disabled by default)
-            if needs_db:
-                save_detection_to_dataset_db({
-                    'camera_id': camera_id,
-                    'object_class': class_name,
-                    'confidence': conf,
-                    'bbox_x': x1,
-                    'bbox_y': y1,
-                    'bbox_width': x2 - x1,
-                    'bbox_height': y2 - y1,
-                    'image_path': detection_image_path,
-                    'dataset_id': 1
-                })
+        if needs_db:
+            save_detection_to_dataset_db({
+                'camera_id': camera_id,
+                'object_class': class_name,
+                'confidence': conf,
+                'bbox_x': x1,
+                'bbox_y': y1,
+                'bbox_width': x2 - x1,
+                'bbox_height': y2 - y1,
+                'image_path': detection_image_path,
+                'dataset_id': 1
+            })
 
+        if needs_event_log:
+            log_surveillance_event_db({
+                'camera_id': camera_id,
+                'event_type': f'{class_name}_detected',
+                'severity': event_severity,
+                'description': f'{class_name.title()} detected with {conf:.2f} confidence',
+                'image_path': detection_image_path
+            })
 
-            # Only log/alert important items
-            if needs_alert:
-                log_surveillance_event_db({
-                    'camera_id': camera_id,
-                    'event_type': f'{class_name}_detected',
-                    'severity': 'medium',
-                    'description': f'{class_name.title()} detected with {conf:.2f} confidence',
-                    'image_path': detection_image_path
-                })
-
-                # Send email alert in a separate thread
-                if detection_image_path:
-                    subject = "Motion Detected!"
-                    to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
-                    body = f"Motion of {class_name} has been detected by the surveillance system."
-                    threading.Thread(target=send_email_alert, args=(subject, body, to, detection_image_path)).start()
+        if should_send_email and detection_image_path:
+            subject = "Motion Detected!"
+            to = os.getenv("ALERT_TO", "user.nightshield@gmail.com")
+            body = f"Motion of {class_name} has been detected by the surveillance system."
+            threading.Thread(target=send_email_alert, args=(subject, body, to, detection_image_path), daemon=True).start()
 
     return frame
 
@@ -1531,24 +2164,9 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
     frame_event = threading.Event()
     capture_failed = threading.Event()
 
-    detection_request = {'frame': None, 'seq': 0}
-    detection_request_lock = threading.Lock()
-    detection_event = threading.Event()
-
-    detection_state = {
-        'tracked': [],
-        'anomalies': [],
-        'meta': {
-            'inference_ms': 0.0,
-            'total_count': 0,
-            'person_count': 0,
-            'weapon_count': 0,
-            'object_count': 0,
-            'source_seq': 0,
-            'updated_at': 0.0,
-        },
-    }
-    detection_state_lock = threading.Lock()
+    # Night Shield fix: Queue frames into inference worker and pull results out without blocking stream rendering.
+    frame_inference_queue: queue.Queue = queue.Queue(maxsize=2)
+    detection_result_queue: queue.Queue = queue.Queue(maxsize=2)
 
     tracker = SimpleObjectTracker(
         iou_threshold=TRACK_IOU_THRESHOLD,
@@ -1559,6 +2177,18 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
         display_conf_min=DETECTION_DISPLAY_CONF_MIN,
         conf_decay_per_sec=TRACK_CONF_DECAY_PER_SEC,
     )
+
+    # Night Shield fix: Keep only freshest item in bounded queues to control latency on CPU.
+    def _queue_replace(target_queue: queue.Queue, payload) -> None:
+        while True:
+            try:
+                target_queue.put_nowait(payload)
+                return
+            except queue.Full:
+                try:
+                    target_queue.get_nowait()
+                except queue.Empty:
+                    return
 
     def capture_worker() -> None:
         global prev_frame
@@ -1578,7 +2208,11 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 with frame_lock:
                     frame_state['frame'] = frame
                     frame_state['seq'] = int(frame_state['seq']) + 1
+                    current_seq = int(frame_state['seq'])
                 frame_event.set()
+
+                # Night Shield fix: Push latest captured frame to background inference thread.
+                _queue_replace(frame_inference_queue, (current_seq, frame.copy()))
 
                 if prev_frame is None:
                     prev_frame = frame.copy()
@@ -1590,16 +2224,13 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
     def detection_worker() -> None:
         local_prev_frame = None
         last_detection_ts = 0.0
+        last_inference_ms = 0.0
 
         while not stop_event.is_set() and not capture_failed.is_set():
-            has_pending = detection_event.wait(timeout=0.2)
-            if not has_pending:
+            try:
+                source_seq, pending_frame = frame_inference_queue.get(timeout=0.2)
+            except queue.Empty:
                 continue
-            detection_event.clear()
-
-            with detection_request_lock:
-                pending_frame = None if detection_request['frame'] is None else detection_request['frame'].copy()
-                source_seq = int(detection_request.get('seq', 0))
 
             if pending_frame is None:
                 continue
@@ -1614,38 +2245,53 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
             if (now - last_detection_ts) < DETECTION_MIN_INTERVAL_SEC:
                 tracked_detections = tracker.get_active_tracks(now=now)
+                tracked_detections = _annotate_weapon_confirmation(tracked_detections, camera_id=1)
                 anomalies = _collect_anomaly_detections(tracked_detections)
                 counts = _count_detection_groups(tracked_detections)
-                with detection_state_lock:
-                    previous_meta = detection_state.get('meta', {})
-                    detection_state['tracked'] = tracked_detections
-                    detection_state['anomalies'] = anomalies
-                    detection_state['meta'] = {
-                        'inference_ms': float(previous_meta.get('inference_ms', 0.0)),
+                _queue_replace(detection_result_queue, {
+                    'tracked': tracked_detections,
+                    'anomalies': anomalies,
+                    'meta': {
+                        'inference_ms': float(last_inference_ms),
                         'total_count': len(tracked_detections),
                         'person_count': counts['person'],
                         'weapon_count': counts['weapon'],
                         'object_count': counts['object'],
                         'source_seq': source_seq,
                         'updated_at': now,
-                    }
+                    },
+                })
                 continue
 
             infer_start = time.perf_counter()
             raw_detections = _run_detection_inference(
                 pending_frame,
                 backend_override=STREAM_DETECTION_BACKEND,
+                camera_id=1,
+                allow_weapon_skip=True,
+                frame_seq=source_seq,
             )
             lane_results = _run_detection_lanes(raw_detections)
             merged_detections = lane_results['object'] + lane_results['person'] + lane_results['weapon']
             tracked_detections = tracker.update(merged_detections, now=now)
+            tracked_detections = _annotate_weapon_confirmation(tracked_detections, camera_id=1)
             anomalies = _collect_anomaly_detections(tracked_detections)
             inference_ms = (time.perf_counter() - infer_start) * 1000.0
+            last_inference_ms = inference_ms
             last_detection_ts = now
 
             emitted_anomalies = []
             for anomaly in anomalies:
-                if _enqueue_anomaly_event(anomaly['class'], anomaly['confidence']):
+                # Night Shield fix: Only emit real-time alerts for high-tier weapon anomalies.
+                is_weapon_anomaly = bool(anomaly.get('weapon_model_hit')) or _lane_name_for_class(anomaly.get('class', '')) == 'weapon'
+                if is_weapon_anomaly and str(anomaly.get('weapon_tier', 'low')).strip().lower() != 'high':
+                    continue
+
+                if _enqueue_anomaly_event(
+                    anomaly['class'],
+                    anomaly['confidence'],
+                    force=bool(anomaly.get('weapon_model_hit')),
+                ):
                     emitted_anomalies.append(anomaly)
 
             if emitted_anomalies and ENABLE_DETECTION_SIDE_EFFECTS:
@@ -1691,10 +2337,10 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                         threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path), daemon=True).start()
 
             counts = _count_detection_groups(tracked_detections)
-            with detection_state_lock:
-                detection_state['tracked'] = tracked_detections
-                detection_state['anomalies'] = anomalies
-                detection_state['meta'] = {
+            _queue_replace(detection_result_queue, {
+                'tracked': tracked_detections,
+                'anomalies': anomalies,
+                'meta': {
                     'inference_ms': inference_ms,
                     'total_count': len(tracked_detections),
                     'person_count': counts['person'],
@@ -1702,7 +2348,8 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                     'object_count': counts['object'],
                     'source_seq': source_seq,
                     'updated_at': now,
-                }
+                },
+            })
 
     capture_thread = threading.Thread(target=capture_worker, name='capture-worker', daemon=True)
     detector_thread = threading.Thread(target=detection_worker, name='detection-worker', daemon=True)
@@ -1710,6 +2357,20 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
         _mark_upload_video_session_started(upload_video_id)
     capture_thread.start()
     detector_thread.start()
+
+    latest_detection_state = {
+        'tracked': [],
+        'anomalies': [],
+        'meta': {
+            'inference_ms': 0.0,
+            'total_count': 0,
+            'person_count': 0,
+            'weapon_count': 0,
+            'object_count': 0,
+            'source_seq': 0,
+            'updated_at': 0.0,
+        },
+    }
 
     last_sent_seq = -1
     last_emit_perf = time.perf_counter()
@@ -1739,14 +2400,15 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 continue
             last_sent_seq = current_seq
 
-            with detection_request_lock:
-                detection_request['frame'] = frame
-                detection_request['seq'] = current_seq
-            detection_event.set()
+            # Night Shield fix: Consume newest available detection result produced by background worker.
+            while True:
+                try:
+                    latest_detection_state = detection_result_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            with detection_state_lock:
-                tracked_detections = list(detection_state.get('tracked', []))
-                detection_meta = dict(detection_state.get('meta', {}))
+            tracked_detections = list(latest_detection_state.get('tracked', []))
+            detection_meta = dict(latest_detection_state.get('meta', {}))
 
             output_frame = frame
             rendered_anomalies = []
@@ -1762,6 +2424,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
             now_perf = time.perf_counter()
             stream_fps = 1.0 / max(1e-6, now_perf - last_emit_perf)
             last_emit_perf = now_perf
+            _update_stream_stats(fps=stream_fps)
 
             total_count = int(detection_meta.get('total_count', len(tracked_detections)))
             person_count = int(detection_meta.get('person_count', 0))
@@ -1827,7 +2490,6 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
             prev_frame = frame.copy()
     finally:
         stop_event.set()
-        detection_event.set()
         frame_event.set()
         if capture_thread.is_alive():
             capture_thread.join(timeout=1.2)
@@ -2330,12 +2992,12 @@ def lowlight_detection():
                 img_for_processing = img.copy()
 
             enhancement_settings = {
-                'brightness': 58,
-                'contrast': 62,
-                'sharpness': 52,
-                'denoise': 52,
-                'upscale': 45,
-                'upscale_scale': '2',
+                'brightness': 64,
+                'contrast': 0,
+                'sharpness': 0,
+                'denoise': 1,
+                'upscale': 100,
+                'upscale_scale': '4',
             }
 
             lowlight_analysis = {}
@@ -2373,10 +3035,29 @@ def lowlight_detection():
                 print(f"Low-light analysis failed: {analysis_error}")
                 lowlight_analysis = {}
 
-            if get_model() is None:
+            if get_model() is None and get_weapon_model() is None and get_phone_model() is None:
                 return jsonify({'error': 'Model not loaded'}), 500
 
-            detections = _run_detection_inference(enhanced_img)
+            detection_frame, detect_to_display_x, detect_to_display_y = _prepare_lowlight_detection_frame(
+                enhanced_img,
+                img_for_processing,
+            )
+            enhanced_view_detections = _run_detection_inference(detection_frame)
+            reference_view_detections = _run_detection_inference(img_for_processing)
+
+            fused_detection_view = _fuse_lowlight_detections(
+                primary=enhanced_view_detections,
+                reference=reference_view_detections,
+                frame_shape=detection_frame.shape,
+            )
+            detections = _scale_detection_boxes(
+                fused_detection_view,
+                scale_x=detect_to_display_x,
+                scale_y=detect_to_display_y,
+                max_w=enhanced_img.shape[1],
+                max_h=enhanced_img.shape[0],
+            )
+
             annotated = detect_objects_and_classify(
                 enhanced_img.copy(),
                 detections=detections,
@@ -2420,6 +3101,9 @@ def lowlight_detection():
                     'top_anomaly': top_anomaly,
                     'superres_method': upscale_meta.get('method', 'unknown'),
                     'superres_backend': upscale_meta.get('backend', 'unknown'),
+                    'detection_enhanced_view': len(enhanced_view_detections),
+                    'detection_reference_view': len(reference_view_detections),
+                    'detection_fused': len(detections),
                 },
                 'upscale_meta': upscale_meta,
                 'lowlight_analysis': lowlight_analysis,
@@ -2463,11 +3147,11 @@ def image_enhancement():
                 return default
 
         settings = {
-            'brightness': _safe_float('brightness', 55),
-            'contrast': _safe_float('contrast', 65),
-            'sharpness': _safe_float('sharpness', 60),
-            'denoise': _safe_float('denoise', 55),
-            'upscale': _safe_float('upscale', 70),
+            'brightness': _safe_float('brightness', 64),
+            'contrast': _safe_float('contrast', 0),
+            'sharpness': _safe_float('sharpness', 0),
+            'denoise': _safe_float('denoise', 1),
+            'upscale': _safe_float('upscale', 100),
             'upscale_scale': request.form.get('upscale_scale', '4'),
         }
 
@@ -2686,6 +3370,23 @@ def video_feed():
         return redirect(url_for('index'))
     stop_event = threading.Event()
     return Response(video_stream(0, stop_event), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+# Night Shield fix: Lightweight stream runtime stats endpoint for dashboard polling.
+@app.route('/stats')
+def stream_stats_api():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    with stream_stats_lock:
+        payload = {
+            'fps': round(float(stream_runtime_stats.get('fps', 0.0) or 0.0), 2),
+            'weapon_model_enabled': bool(stream_runtime_stats.get('weapon_model_enabled', ENABLE_WEAPON_MODEL)),
+            'last_weapon_detection': stream_runtime_stats.get('last_weapon_detection') or None,
+        }
+
+    payload['superres_engine'] = str(superres_backend_name() or os.getenv('SUPERRES_ENGINE', 'realesrgan'))
+    return jsonify(payload)
 
 @app.route('/anomaly_alerts')
 def anomaly_alerts():

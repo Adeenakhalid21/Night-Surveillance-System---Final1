@@ -98,6 +98,21 @@ $env:ANOMALY_CONF_MIN = "0.5"
 python .\main.py
 ```
 
+### Launch with Recommended Hugging Face Detector (Grounding DINO)
+```powershell
+# Use Hugging Face zero-shot backend as primary detector
+$env:DETECTION_BACKEND = "hf"
+$env:HF_DETECTOR_TASK = "zero-shot-object-detection"
+$env:HF_OBJECT_DETECTION_MODEL = "IDEA-Research/grounding-dino-base"
+
+# Optional tuning for stricter detections
+$env:HF_ZERO_SHOT_THRESHOLD = "0.30"
+$env:HF_ZERO_SHOT_POST_CONF_MIN = "0.30"
+
+# Run the application
+python .\main.py
+```
+
 ---
 
 ## 📚 Training Datasets
@@ -250,11 +265,17 @@ ALERT_TO=recipient@example.com
 
 # Model Configuration
 YOLO_WEIGHTS=yolov8n.pt
+DETECTION_BACKEND=hf
+HF_DETECTOR_TASK=zero-shot-object-detection
+HF_OBJECT_DETECTION_MODEL=IDEA-Research/grounding-dino-base
 
 # Detection Settings
 DISABLE_DETECTION_DB=1
 IMPORTANT_CLASSES=person,car,truck,motorcycle
 ALERT_CONF_MIN=0.6
+HF_ZERO_SHOT_THRESHOLD=0.30
+HF_ZERO_SHOT_POST_CONF_MIN=0.30
+HF_ZERO_SHOT_MAX_LABELS=28
 
 # Anomaly Detection
 ENABLE_ANOMALY_ALERTS=1

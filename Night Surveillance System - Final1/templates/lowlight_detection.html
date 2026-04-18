@@ -644,12 +644,28 @@
                <b>${improvement.contrast_gain ?? '-'}</b>
              </div>
              <div class="analysis-item">
+               <small>Detail Gain (Dynamic Range)</small>
+               <b>${improvement.detail_gain ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Highlight Shift (%)</small>
+               <b>${improvement.highlight_delta_percent ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Noise Delta</small>
+               <b>${improvement.noise_delta ?? '-'}</b>
+             </div>
+             <div class="analysis-item">
                <small>Luminance (Before -> After)</small>
                <b>${beforeMetrics.mean_luminance ?? '-'} -> ${afterMetrics.mean_luminance ?? '-'}</b>
              </div>
              <div class="analysis-item">
                <small>Improvement Quality</small>
-               <b>${String(improvement.quality || 'n/a').toUpperCase()}</b>
+               <b>${String(improvement.quality || 'n/a').toUpperCase()}${Number.isFinite(Number(improvement.quality_score)) ? ` (${Number(improvement.quality_score).toFixed(1)})` : ''}</b>
+             </div>
+             <div class="analysis-item">
+               <small>Overexposure Risk</small>
+               <b>${improvement.overexposed_risk ? 'YES' : 'NO'}</b>
              </div>
            </div>
            <p class="meta-line">${after.recommendation || before.recommendation || ''}</p>

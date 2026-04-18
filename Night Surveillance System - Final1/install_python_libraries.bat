@@ -68,7 +68,7 @@ if errorlevel 1 (
 )
 
 echo [5/5] Verifying key imports...
-"%PYTHON_EXE%" %PYTHON_ARGS% -c "import flask, ultralytics, cv2, numpy, PIL, skimage, scipy, dotenv, psycopg2, matplotlib; print('All required libraries imported successfully.')"
+"%PYTHON_EXE%" %PYTHON_ARGS% -c "import flask, ultralytics, cv2, numpy, PIL, skimage, scipy, dotenv, psycopg2, matplotlib, transformers, torch; print('All required libraries imported successfully.')"
 if errorlevel 1 goto :install_failed
 
 echo.

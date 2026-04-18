@@ -17,3 +17,9 @@ torchvision>=0.17.0
 packaging>=24.0
 requests>=2.31.0
 tqdm>=4.66.0
+
+# Night Shield fix: Real-ESRGAN stack for real-world surveillance upscaling.
+basicsr
+realesrgan
+facexlib
+gfpgan

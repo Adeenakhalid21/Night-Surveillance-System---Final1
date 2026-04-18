@@ -7,6 +7,71 @@
   <title>Night Shield | Dashboard</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Sharp:opsz,wght,FILL,GRAD@48,400,0,0" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css')}}">
+  <!-- Night Shield fix: Add an on-dashboard detection legend for regular vs weapon overlays. -->
+  <style>
+    .detection-legend {
+      margin-top: 0.75rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      justify-content: center;
+      font-size: 0.82rem;
+      color: #d8e2ff;
+    }
+    .legend-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.3rem 0.55rem;
+      border-radius: 0.55rem;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+    }
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+    .legend-dot.regular {
+      background: #00ff00;
+    }
+    .legend-dot.weapon {
+      background: #ff3b3b;
+    }
+    .legend-dot.weapon-low {
+      background: #ffd24d;
+    }
+    .legend-dot.weapon-medium {
+      background: #ff9f43;
+    }
+    .legend-dot.weapon-high {
+      background: #ff3b3b;
+    }
+    .legend-dot.weapon-pending {
+      background: #5bc0de;
+    }
+    .video-stage {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+    }
+    .stream-fps-badge {
+      position: absolute;
+      top: 0.7rem;
+      right: 0.7rem;
+      z-index: 5;
+      padding: 0.3rem 0.55rem;
+      border-radius: 0.55rem;
+      font-size: 0.76rem;
+      font-weight: 600;
+      color: #f8fbff;
+      background: rgba(9, 16, 33, 0.72);
+      border: 1px solid rgba(173, 195, 255, 0.45);
+      backdrop-filter: blur(4px);
+      letter-spacing: 0.02em;
+    }
+  </style>
 </head>
 <body>
    <!-- Anomaly Alert Notifications -->
@@ -103,7 +168,19 @@
             <h3>Live Video</h3>
           </div>
           <div class="card-body">
-            <img id="video-stream" src="" alt="Video Stream">
+            <!-- Night Shield fix: Overlay live stream FPS in the video panel. -->
+            <div class="video-stage">
+              <img id="video-stream" src="" alt="Video Stream">
+              <div id="stream-fps-badge" class="stream-fps-badge">FPS --</div>
+            </div>
+            <!-- Night Shield fix: Explicit confidence-tier legend for weapon detections. -->
+            <div class="detection-legend">
+              <span class="legend-chip"><span class="legend-dot regular"></span>Regular Detection</span>
+              <span class="legend-chip"><span class="legend-dot weapon-low"></span>⚠ Weapon Low (DB only)</span>
+              <span class="legend-chip"><span class="legend-dot weapon-medium"></span>⚠ Weapon Medium (Snapshot + Log)</span>
+              <span class="legend-chip"><span class="legend-dot weapon-high"></span>⚠ Weapon High (Full Alert)</span>
+              <span class="legend-chip"><span class="legend-dot weapon-pending"></span>⚠ Weapon Pending Confirmation</span>
+            </div>
           </div>
         </div>
 
@@ -211,6 +288,7 @@
      const videoStream = document.getElementById('video-stream');
      const cameraBtnText = document.getElementById('camera-btn-text');
      const liveDatetimeEl = document.getElementById('live-datetime');
+    const streamFpsBadge = document.getElementById('stream-fps-badge');
      let cameraActive = false;
      let eventSource = null;
     let lastAnomalyEventId = 0;
@@ -265,10 +343,39 @@
        }
      }
 
+     // Night Shield fix: Poll /stats every 2s while camera is active for live FPS updates.
+     async function refreshStreamRuntimeStats() {
+       if (!cameraActive) return;
+       try {
+         const response = await fetch('{{ url_for("stream_stats_api") }}', {
+           method: 'GET',
+           headers: {
+             'Accept': 'application/json',
+           },
+           cache: 'no-store',
+         });
+
+         if (!response.ok) {
+           return;
+         }
+
+         const payload = await response.json();
+         const fps = Number(payload.fps);
+         const fpsText = Number.isFinite(fps) ? fps.toFixed(1) : '--';
+         const weaponState = payload.weapon_model_enabled ? 'WEAPON ON' : 'WEAPON OFF';
+         if (streamFpsBadge) {
+           streamFpsBadge.textContent = `FPS ${fpsText} | ${weaponState}`;
+         }
+       } catch (err) {
+         console.warn('Stream stats refresh failed:', err);
+       }
+     }
+
      updateLiveDateTime();
      refreshDashboardStats();
      setInterval(updateLiveDateTime, 1000);
      setInterval(refreshDashboardStats, 15000);
+    setInterval(refreshStreamRuntimeStats, 2000);
 
      toggleCameraBtn.addEventListener('click', function() {
        cameraActive = !cameraActive;
@@ -277,6 +384,7 @@
          videoContainer.style.display = 'block';
          videoStream.src = "{{ url_for('video_feed') }}";
          cameraBtnText.textContent = 'Stop Camera';
+         refreshStreamRuntimeStats();
          
          // Start listening for anomaly alerts
          startAnomalyAlerts();
@@ -284,6 +392,9 @@
          videoContainer.style.display = 'none';
          videoStream.src = '';
          cameraBtnText.textContent = 'Start Camera';
+         if (streamFpsBadge) {
+           streamFpsBadge.textContent = 'FPS --';
+         }
          
          // Stop listening for anomaly alerts
          if (eventSource) {
