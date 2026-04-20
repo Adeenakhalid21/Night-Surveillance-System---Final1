@@ -489,6 +489,46 @@ $env:ALERT_CONF_MIN = "0.6"
 $env:FRAME_SKIP = "2"  # process every 2nd frame
 ```
 
+#### Night Shield fix: Low-Light Pipeline (Brighten -> Denoise -> Upscale)
+```powershell
+# Stage 1: low-light brightening
+$env:LOWLIGHT_GAMMA = "2.2"
+$env:CLAHE_CLIP_LIMIT = "3.0"
+
+# Stage 2: denoise toggle
+$env:ENABLE_DENOISE = "1"
+
+# Stage 3: super-resolution backend (recommended)
+$env:SUPERRES_ENGINE = "realesrgan"
+```
+
+#### Night Shield fix: Uploaded Video Performance Controls
+```powershell
+# Use source/native video FPS by default (leave empty)
+$env:VIDEO_PLAYBACK_FPS = ""
+
+# Run detection on every Nth frame and reuse cached detections on skipped frames
+$env:VIDEO_DETECT_EVERY = "5"
+
+# Keep off for smooth playback on CPU. If enabled, only keyframes are enhanced.
+$env:VIDEO_ENHANCE = "0"
+```
+
+#### Night Shield fix: Upload Video API Endpoints
+```powershell
+# Stream endpoint (MJPEG)
+GET /upload_video_feed?video_id=<id>
+
+# Metadata endpoint
+POST /video_info
+
+# Runtime stats endpoint (progress/fps/eta)
+GET /video_stats?video_id=<id>
+
+# Stop processing endpoint
+POST /video_stop
+```
+
 ### View Current Environment
 ```powershell
 # View all Python-related env vars

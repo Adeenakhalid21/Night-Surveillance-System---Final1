@@ -8,16 +8,40 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Sharp:opsz,wght,FILL,GRAD@48,400,0,0" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css')}}">
   <style>
+    main {
+      --surface-card-bg: rgba(255, 255, 255, 0.92);
+      --surface-card-border: rgba(15, 23, 42, 0.12);
+      --surface-card-text: #0f172a;
+      --surface-muted-text: #334155;
+      --surface-soft-bg: rgba(241, 245, 249, 0.9);
+      --surface-list-bg: #ffffff;
+      --surface-chart-bg: #ffffff;
+      --surface-track-bg: rgba(15, 23, 42, 0.12);
+    }
+
+    .dark-theme-variables main {
+      --surface-card-bg: rgba(15, 23, 42, 0.86);
+      --surface-card-border: rgba(148, 163, 184, 0.24);
+      --surface-card-text: #f8fafc;
+      --surface-muted-text: #cbd5e1;
+      --surface-soft-bg: rgba(30, 41, 59, 0.78);
+      --surface-list-bg: rgba(30, 41, 59, 0.94);
+      --surface-chart-bg: rgba(15, 23, 42, 0.96);
+      --surface-track-bg: rgba(148, 163, 184, 0.2);
+    }
+
     .upload-card,
     .stream-card,
     .summary-card,
     .graph-card,
     .context-card {
-      background: var(--color-white);
+      background: var(--surface-card-bg);
+      border: 1px solid var(--surface-card-border);
       border-radius: var(--card-border-radius);
       box-shadow: var(--box-shadow);
       padding: 1.1rem;
       margin-top: 1.05rem;
+      color: var(--surface-card-text);
     }
 
     .upload-form {
@@ -30,10 +54,11 @@
     .upload-form input[type="file"] {
       flex: 1 1 260px;
       min-width: 220px;
-      border: 1px dashed var(--color-primary);
+      border: 1px dashed var(--clr-primary);
       border-radius: 10px;
       padding: 0.8rem;
-      background: var(--color-light);
+      background: var(--surface-soft-bg);
+      color: var(--surface-card-text);
     }
 
     .btn-primary {
@@ -65,8 +90,83 @@
     .stream-card img {
       width: 100%;
       border-radius: 10px;
-      border: 1px solid var(--color-light);
+      border: 1px solid var(--surface-card-border);
       background: #030712;
+    }
+
+    .processing-panel {
+      margin-top: 0.75rem;
+      border: 1px solid var(--surface-card-border);
+      border-radius: 10px;
+      padding: 0.72rem;
+      background: var(--surface-soft-bg);
+    }
+
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.84rem;
+      margin-bottom: 0.35rem;
+      color: var(--surface-muted-text);
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--surface-track-bg);
+      overflow: hidden;
+      margin-bottom: 0.55rem;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #0ea5e9, #22c55e);
+      transition: width 0.25s ease;
+    }
+
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(90px, 1fr));
+      gap: 0.45rem;
+      font-size: 0.8rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .stats-strip div {
+      border: 1px solid var(--surface-card-border);
+      border-radius: 8px;
+      padding: 0.42rem 0.5rem;
+      background: var(--surface-list-bg);
+      color: var(--surface-muted-text);
+    }
+
+    .stats-strip div b {
+      color: var(--surface-card-text);
+    }
+
+    .video-meta {
+      font-size: 0.78rem;
+      opacity: 1;
+      margin-bottom: 0.6rem;
+      color: var(--surface-muted-text);
+    }
+
+    .stop-btn {
+      border: 0;
+      border-radius: 8px;
+      padding: 0.56rem 0.85rem;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      background: linear-gradient(100deg, #ef4444, #dc2626);
+    }
+
+    .stop-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.65;
     }
 
     .status-row {
@@ -91,6 +191,8 @@
 
     .status-ready { background: rgba(99, 102, 241, 0.17); color: #3f47bd; }
     .status-processing { background: rgba(6, 182, 212, 0.17); color: #0a7488; }
+    .status-stopping { background: rgba(245, 158, 11, 0.2); color: #8a5605; }
+    .status-stopped { background: rgba(148, 163, 184, 0.22); color: #334155; }
     .status-completed { background: rgba(34, 197, 94, 0.18); color: #0d7a37; }
     .status-failed { background: rgba(239, 68, 68, 0.18); color: #9f1d1d; }
 
@@ -101,15 +203,15 @@
     }
 
     .metric-item {
-      border: 1px solid var(--color-light);
+      border: 1px solid var(--surface-card-border);
       border-radius: 9px;
       padding: 0.65rem;
-      background: rgba(241, 245, 249, 0.6);
+      background: var(--surface-soft-bg);
     }
 
     .metric-item .label {
       font-size: 0.72rem;
-      opacity: 0.78;
+      color: var(--surface-muted-text);
       text-transform: uppercase;
       letter-spacing: 0.04em;
       margin-bottom: 0.28rem;
@@ -118,6 +220,7 @@
     .metric-item .value {
       font-size: 1.2rem;
       font-weight: 700;
+      color: var(--surface-card-text);
     }
 
     #summary-chart {
@@ -125,8 +228,8 @@
       height: 360px;
       display: block;
       border-radius: 10px;
-      border: 1px solid var(--color-light);
-      background: #fff;
+      border: 1px solid var(--surface-card-border);
+      background: var(--surface-chart-bg);
     }
 
     .context-columns {
@@ -145,14 +248,38 @@
     }
 
     .count-list li {
-      border: 1px solid var(--color-light);
+      border: 1px solid var(--surface-card-border);
       border-radius: 8px;
       padding: 0.45rem 0.55rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      background: #fff;
+      background: var(--surface-list-bg);
       font-size: 0.9rem;
+      color: var(--surface-card-text);
+    }
+
+    .count-list li span:first-child {
+      color: var(--surface-muted-text);
+    }
+
+    .count-list li span:last-child {
+      color: var(--surface-card-text);
+      font-weight: 700;
+    }
+
+    .stream-card h3,
+    .summary-card h3,
+    .graph-card h3,
+    .context-card h3,
+    .context-card h4 {
+      color: var(--surface-card-text);
+    }
+
+    #context-narrative,
+    #video-name {
+      color: var(--surface-muted-text);
+      opacity: 1 !important;
     }
 
     @media (max-width: 1024px) {
@@ -241,6 +368,23 @@
         <div class="stream-card">
           <h3 style="margin-bottom: 0.7rem;">Detection Stream</h3>
           <img id="video-stream" src="{{ url_for('upload_video_feed', video_id=video_id) }}" alt="Uploaded video stream">
+          <div class="processing-panel">
+            <div class="progress-meta">
+              <span id="progress-label">Progress: 0.0%</span>
+              <span id="progress-frames">Frame 0 / 0</span>
+            </div>
+            <div class="progress-track">
+              <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div class="stats-strip">
+              <div>FPS<br><b id="proc-fps">0.0</b></div>
+              <div>Detections<br><b id="proc-detections">0</b></div>
+              <div>Elapsed<br><b id="proc-elapsed">00:00</b></div>
+              <div>ETA<br><b id="proc-eta">00:00</b></div>
+            </div>
+            <div class="video-meta" id="video-meta">Video metadata loading...</div>
+            <button id="stop-video-btn" class="stop-btn" type="button">Stop Processing</button>
+          </div>
         </div>
 
         <div class="summary-card">
@@ -360,12 +504,21 @@
   <script>
     const videoId = {{ (video_id or '') | tojson }};
     const summaryUrl = videoId ? `/upload_video_summary?video_id=${encodeURIComponent(videoId)}` : '';
+    const statsUrl = videoId ? `/video_stats?video_id=${encodeURIComponent(videoId)}` : '';
+    const infoUrl = '/video_info';
+    const stopUrl = '/video_stop';
     const summaryCanvas = document.getElementById('summary-chart');
+    const stopBtn = document.getElementById('stop-video-btn');
+    const themeToggleBtn = document.querySelector('.theme-toggler');
 
     let pollTimer = null;
+    let statsTimer = null;
+    let latestGraphSnapshot = null;
 
     function statusClass(status) {
       if (status === 'processing') return 'status-pill status-processing';
+      if (status === 'stopping') return 'status-pill status-stopping';
+      if (status === 'stopped') return 'status-pill status-stopped';
       if (status === 'completed') return 'status-pill status-completed';
       if (status === 'failed') return 'status-pill status-failed';
       return 'status-pill status-ready';
@@ -381,6 +534,13 @@
       if (status === 'failed' && narrative) {
         narrative.textContent = errorText || 'Video processing failed.';
       }
+      if (status === 'stopped' && narrative) {
+        narrative.textContent = 'Video processing stopped by user.';
+      }
+
+      if (stopBtn) {
+        stopBtn.disabled = (status === 'completed' || status === 'failed' || status === 'stopped');
+      }
     }
 
     function formatNumber(value, fallback = '0') {
@@ -391,6 +551,129 @@
     function setMetric(id, value) {
       const node = document.getElementById(id);
       if (node) node.textContent = value;
+    }
+
+    function formatClock(totalSec) {
+      const sec = Math.max(0, Math.floor(Number(totalSec || 0)));
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      if (h > 0) {
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      }
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function updateProgressUI(data) {
+      const progress = Number(data?.progress_percent || 0);
+      const currentFrame = Number(data?.current_frame || 0);
+      const totalFrames = Number(data?.total_frames || 0);
+
+      const progressFill = document.getElementById('progress-fill');
+      if (progressFill) {
+        progressFill.style.width = `${Math.max(0, Math.min(100, progress)).toFixed(2)}%`;
+      }
+
+      const progressLabel = document.getElementById('progress-label');
+      if (progressLabel) {
+        progressLabel.textContent = `Progress: ${Math.max(0, Math.min(100, progress)).toFixed(1)}%`;
+      }
+
+      const progressFrames = document.getElementById('progress-frames');
+      if (progressFrames) {
+        progressFrames.textContent = `Frame ${currentFrame} / ${totalFrames}`;
+      }
+
+      const procFps = document.getElementById('proc-fps');
+      if (procFps) {
+        procFps.textContent = Number(data?.processing_fps || 0).toFixed(1);
+      }
+
+      const procDetections = document.getElementById('proc-detections');
+      if (procDetections) {
+        procDetections.textContent = String(Number(data?.total_detections || 0));
+      }
+
+      const procElapsed = document.getElementById('proc-elapsed');
+      if (procElapsed) {
+        procElapsed.textContent = formatClock(data?.elapsed_sec || 0);
+      }
+
+      const procEta = document.getElementById('proc-eta');
+      if (procEta) {
+        procEta.textContent = formatClock(data?.eta_sec || 0);
+      }
+    }
+
+    async function fetchVideoInfo() {
+      if (!videoId) return;
+      try {
+        const response = await fetch(infoUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify({ video_id: videoId }),
+        });
+
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!data?.success) return;
+
+        const videoMeta = document.getElementById('video-meta');
+        if (videoMeta) {
+          videoMeta.textContent = `Source: ${data.width}x${data.height} | FPS: ${Number(data.fps || 0).toFixed(2)} | Frames: ${data.frame_count} | Duration: ${formatClock(data.duration_sec || 0)}`;
+        }
+      } catch (err) {
+        console.warn('Video info fetch failed:', err);
+      }
+    }
+
+    async function fetchVideoStats() {
+      if (!statsUrl) return;
+      try {
+        const response = await fetch(statsUrl, { cache: 'no-store' });
+        const data = await response.json();
+
+        if (!response.ok || !data?.success) {
+          return;
+        }
+
+        setStatus(data.status || 'ready', '');
+        updateProgressUI(data);
+
+        if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
+          if (statsTimer) {
+            clearInterval(statsTimer);
+            statsTimer = null;
+          }
+        }
+      } catch (err) {
+        console.warn('Video stats fetch failed:', err);
+      }
+    }
+
+    async function requestVideoStop() {
+      if (!videoId) return;
+      if (stopBtn) stopBtn.disabled = true;
+      try {
+        await fetch(stopUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify({ video_id: videoId }),
+        });
+        setStatus('stopping', '');
+      } catch (err) {
+        console.warn('Failed to send stop request:', err);
+      }
+    }
+
+    if (stopBtn) {
+      stopBtn.addEventListener('click', requestVideoStop);
     }
 
     function renderCountList(targetId, items, emptyText) {
@@ -409,10 +692,32 @@
       }).join('');
     }
 
+    function chartPalette() {
+      const isDark = document.body.classList.contains('dark-theme-variables');
+      if (isDark) {
+        return {
+          background: '#0f172a',
+          axis: '#cbd5e1',
+          grid: 'rgba(148, 163, 184, 0.25)',
+          legend: '#e2e8f0',
+          waiting: '#94a3b8',
+        };
+      }
+
+      return {
+        background: '#f8fafc',
+        axis: '#6b7280',
+        grid: 'rgba(148, 163, 184, 0.25)',
+        legend: '#334155',
+        waiting: '#64748b',
+      };
+    }
+
     function drawSummaryChart(graph) {
       if (!summaryCanvas) return;
       const ctx = summaryCanvas.getContext('2d');
       if (!ctx) return;
+      const palette = chartPalette();
 
       const rect = summaryCanvas.getBoundingClientRect();
       if (rect.width > 0 && summaryCanvas.width !== Math.floor(rect.width)) {
@@ -427,7 +732,7 @@
       const padBottom = 34;
 
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = '#f8fafc';
+      ctx.fillStyle = palette.background;
       ctx.fillRect(0, 0, width, height);
 
       const detections = Array.isArray(graph?.detections) ? graph.detections : [];
@@ -437,7 +742,7 @@
 
       const points = Math.max(detections.length, anomalies.length, persons.length, weapons.length);
       if (points < 2) {
-        ctx.fillStyle = '#64748b';
+        ctx.fillStyle = palette.waiting;
         ctx.font = '14px sans-serif';
         ctx.fillText('Waiting for enough points to render graph...', 20, 32);
         return;
@@ -457,14 +762,14 @@
       ctx.lineTo(padLeft + plotW, padTop + plotH);
       ctx.stroke();
 
-      ctx.fillStyle = '#6b7280';
+      ctx.fillStyle = palette.axis;
       ctx.font = '12px sans-serif';
       for (let i = 0; i <= 4; i += 1) {
         const yVal = Math.round((maxY * i) / 4);
         const y = padTop + plotH - (plotH * (i / 4));
         ctx.fillText(String(yVal), 6, y + 4);
 
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+        ctx.strokeStyle = palette.grid;
         ctx.beginPath();
         ctx.moveTo(padLeft, y);
         ctx.lineTo(padLeft + plotW, y);
@@ -503,7 +808,7 @@
       legend.forEach(([name, color]) => {
         ctx.fillStyle = color;
         ctx.fillRect(legendX, legendY - 8, 12, 3);
-        ctx.fillStyle = '#334155';
+        ctx.fillStyle = palette.legend;
         ctx.fillText(name, legendX + 16, legendY);
         legendX += Math.max(80, ctx.measureText(name).width + 34);
       });
@@ -544,7 +849,8 @@
 
         renderCountList('top-classes-list', data.context?.top_detected_classes, 'No detections yet');
         renderCountList('top-anomaly-list', data.context?.top_anomaly_classes, 'No anomalies yet');
-        drawSummaryChart(data.graph || {});
+        latestGraphSnapshot = data.graph || {};
+        drawSummaryChart(latestGraphSnapshot);
 
         const videoName = document.getElementById('video-name');
         if (videoName && data.video_name) {
@@ -556,6 +862,21 @@
             clearInterval(pollTimer);
             pollTimer = null;
           }
+          if (statsTimer) {
+            clearInterval(statsTimer);
+            statsTimer = null;
+          }
+        }
+
+        if (data.status === 'stopped') {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          if (statsTimer) {
+            clearInterval(statsTimer);
+            statsTimer = null;
+          }
         }
       } catch (error) {
         setStatus('failed', `Summary polling error: ${error.message}`);
@@ -563,13 +884,28 @@
           clearInterval(pollTimer);
           pollTimer = null;
         }
+        if (statsTimer) {
+          clearInterval(statsTimer);
+          statsTimer = null;
+        }
       }
     }
 
     if (videoId) {
+      fetchVideoInfo();
+      fetchVideoStats();
       fetchSummary();
-      pollTimer = setInterval(fetchSummary, 1200);
+      pollTimer = setInterval(fetchSummary, 2000);
+      statsTimer = setInterval(fetchVideoStats, 2000);
       window.addEventListener('resize', () => fetchSummary());
+    }
+
+    if (themeToggleBtn) {
+      themeToggleBtn.addEventListener('click', () => {
+        if (latestGraphSnapshot) {
+          drawSummaryChart(latestGraphSnapshot);
+        }
+      });
     }
   </script>
 </body>

@@ -10,6 +10,7 @@ import smtplib
 from email.message import EmailMessage
 from enhancement import (
     analyze_lowlight_improvement,
+    enhance_image,
     enhance_image_with_meta,
     enhance_night_image,
     enhancement_stage_keys,
@@ -408,6 +409,10 @@ enhancement_jobs_lock = threading.Lock()
 upload_video_sessions = {}
 upload_video_sessions_lock = threading.Lock()
 
+# Night Shield fix: External stop control for uploaded-video processing loops.
+upload_video_stop_events = {}
+upload_video_stop_events_lock = threading.Lock()
+
 # Night Shield fix: Track per-camera weapon confirmation counts and cached weapon detections.
 weapon_confirmation_state = {}
 weapon_confirmation_lock = threading.Lock()
@@ -584,6 +589,15 @@ DETECTION_LANE_WORKERS = max(1, min(3, int(float(os.getenv('DETECTION_LANE_WORKE
 ENABLE_DETECTION_SIDE_EFFECTS = str(os.getenv('ENABLE_DETECTION_SIDE_EFFECTS', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 SAVE_DETECTION_FRAMES = str(os.getenv('SAVE_DETECTION_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 SAVE_ANOMALY_FRAMES = str(os.getenv('SAVE_ANOMALY_FRAMES', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+VIDEO_PLAYBACK_FPS_RAW = str(os.getenv('VIDEO_PLAYBACK_FPS', '') or '').strip()
+try:
+    VIDEO_PLAYBACK_FPS = float(VIDEO_PLAYBACK_FPS_RAW) if VIDEO_PLAYBACK_FPS_RAW else 0.0
+except Exception:
+    VIDEO_PLAYBACK_FPS = 0.0
+# Night Shield fix: Run uploaded-video detection every N frames and reuse cached results on skipped frames.
+VIDEO_DETECT_EVERY = max(1, int(float(os.getenv('VIDEO_DETECT_EVERY', '5'))))
+# Night Shield fix: Optional enhancement on uploaded videos (disabled by default for real-time playback).
+VIDEO_ENHANCE = str(os.getenv('VIDEO_ENHANCE', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 LOWLIGHT_DETECTION_MAX_SIDE = max(480, int(float(os.getenv('LOWLIGHT_DETECTION_MAX_SIDE', '1280'))))
 LOWLIGHT_FUSION_IOU = float(os.getenv('LOWLIGHT_FUSION_IOU', '0.45'))
 LOWLIGHT_FUSION_CONF_BOOST = float(os.getenv('LOWLIGHT_FUSION_CONF_BOOST', '0.06'))
@@ -879,9 +893,24 @@ def _register_upload_video_session(video_id: str, original_name: str, stored_nam
             'started_at': None,
             'completed_at': None,
             'updated_at': time.time(),
+            'total_frames': 0,
+            'current_frame': 0,
+            'progress_percent': 0.0,
+            'native_fps': 0.0,
+            'playback_fps': 0.0,
+            'frame_delay_sec': 0.0,
+            'frame_width': 0,
+            'frame_height': 0,
+            'duration_sec': 0.0,
+            'detect_every': int(VIDEO_DETECT_EVERY),
+            'video_enhance': bool(VIDEO_ENHANCE),
+            'elapsed_sec': 0.0,
+            'eta_sec': 0.0,
+            'latest_fps': 0.0,
             'frames_processed': 0,
             'total_detections': 0,
             'total_anomalies': 0,
+            'weapon_detections_total': 0,
             'peak_detections': 0,
             'peak_anomalies': 0,
             'sum_inference_ms': 0.0,
@@ -899,14 +928,22 @@ def _register_upload_video_session(video_id: str, original_name: str, stored_nam
                 'inference_ms': [],
                 'fps': [],
             },
+            'summary_saved': False,
+            'stop_requested': False,
             'error': '',
         }
 
 
 def _reset_upload_video_session_metrics(session_data: dict) -> None:
+    session_data['current_frame'] = 0
+    session_data['progress_percent'] = 0.0
+    session_data['elapsed_sec'] = 0.0
+    session_data['eta_sec'] = 0.0
+    session_data['latest_fps'] = 0.0
     session_data['frames_processed'] = 0
     session_data['total_detections'] = 0
     session_data['total_anomalies'] = 0
+    session_data['weapon_detections_total'] = 0
     session_data['peak_detections'] = 0
     session_data['peak_anomalies'] = 0
     session_data['sum_inference_ms'] = 0.0
@@ -935,7 +972,28 @@ def _mark_upload_video_session_started(video_id: str) -> None:
         session_data['status'] = 'processing'
         session_data['started_at'] = time.time()
         session_data['completed_at'] = None
+        session_data['stop_requested'] = False
+        session_data['summary_saved'] = False
         session_data['error'] = ''
+        session_data['updated_at'] = time.time()
+
+
+# Night Shield fix: Attach upload-video metadata so frontend can show expected playback dimensions/fps/progress.
+def _set_upload_video_session_metadata(video_id: str, metadata: dict) -> None:
+    with upload_video_sessions_lock:
+        session_data = upload_video_sessions.get(video_id)
+        if not session_data:
+            return
+
+        session_data['native_fps'] = max(0.0, float(metadata.get('native_fps', session_data.get('native_fps', 0.0)) or 0.0))
+        session_data['playback_fps'] = max(0.0, float(metadata.get('playback_fps', session_data.get('playback_fps', 0.0)) or 0.0))
+        session_data['frame_delay_sec'] = max(0.0, float(metadata.get('frame_delay_sec', session_data.get('frame_delay_sec', 0.0)) or 0.0))
+        session_data['frame_width'] = max(0, int(metadata.get('frame_width', session_data.get('frame_width', 0)) or 0))
+        session_data['frame_height'] = max(0, int(metadata.get('frame_height', session_data.get('frame_height', 0)) or 0))
+        session_data['total_frames'] = max(0, int(metadata.get('total_frames', session_data.get('total_frames', 0)) or 0))
+        session_data['duration_sec'] = max(0.0, float(metadata.get('duration_sec', session_data.get('duration_sec', 0.0)) or 0.0))
+        session_data['detect_every'] = max(1, int(metadata.get('detect_every', session_data.get('detect_every', VIDEO_DETECT_EVERY)) or VIDEO_DETECT_EVERY))
+        session_data['video_enhance'] = bool(metadata.get('video_enhance', session_data.get('video_enhance', VIDEO_ENHANCE)))
         session_data['updated_at'] = time.time()
 
 
@@ -950,32 +1008,57 @@ def _update_upload_video_session(
         if not session_data:
             return
 
-        frames_processed = int(session_data.get('frames_processed', 0)) + 1
+        frame_number = max(0, int(metrics.get('frame_number', int(session_data.get('current_frame', 0)) + 1)))
+        total_frames = max(0, int(metrics.get('total_frames', session_data.get('total_frames', 0)) or 0))
+        if total_frames > 0:
+            session_data['total_frames'] = total_frames
+
+        session_data['current_frame'] = max(int(session_data.get('current_frame', 0)), frame_number)
+        frames_processed = int(session_data.get('current_frame', 0))
+        session_data['frames_processed'] = frames_processed
+
+        elapsed_sec = float(metrics.get('elapsed_sec', 0.0) or 0.0)
+        session_data['elapsed_sec'] = max(0.0, elapsed_sec)
+
+        eta_sec = float(metrics.get('eta_sec', 0.0) or 0.0)
+        session_data['eta_sec'] = max(0.0, eta_sec)
+
         total_count = int(metrics.get('total_count', len(tracked_detections)))
         anomaly_count = int(metrics.get('anomaly_count', len(anomalies)))
+        weapon_count = int(metrics.get('weapon_count', 0))
         inference_ms = float(metrics.get('inference_ms', 0.0))
         stream_fps = float(metrics.get('fps', 0.0))
+        is_detect_frame = bool(metrics.get('is_detect_frame', True))
 
-        session_data['frames_processed'] = frames_processed
-        session_data['total_detections'] = int(session_data.get('total_detections', 0)) + total_count
-        session_data['total_anomalies'] = int(session_data.get('total_anomalies', 0)) + anomaly_count
+        if total_frames > 0:
+            session_data['progress_percent'] = round(min(100.0, (frames_processed / total_frames) * 100.0), 2)
+        else:
+            session_data['progress_percent'] = 0.0
+
+        if is_detect_frame:
+            session_data['total_detections'] = int(session_data.get('total_detections', 0)) + total_count
+            session_data['total_anomalies'] = int(session_data.get('total_anomalies', 0)) + anomaly_count
+            session_data['weapon_detections_total'] = int(session_data.get('weapon_detections_total', 0)) + max(0, weapon_count)
+
         session_data['peak_detections'] = max(int(session_data.get('peak_detections', 0)), total_count)
         session_data['peak_anomalies'] = max(int(session_data.get('peak_anomalies', 0)), anomaly_count)
         session_data['sum_inference_ms'] = float(session_data.get('sum_inference_ms', 0.0)) + inference_ms
         session_data['sum_fps'] = float(session_data.get('sum_fps', 0.0)) + stream_fps
+        session_data['latest_fps'] = max(0.0, stream_fps)
 
         max_conf = max([float(det.get('confidence', 0.0)) for det in tracked_detections] + [0.0])
         session_data['max_confidence'] = max(float(session_data.get('max_confidence', 0.0)), max_conf)
 
-        class_counts = session_data.setdefault('class_counts', {})
-        for det in tracked_detections:
-            label = _normalize_label(det.get('class', '')) or 'unknown'
-            class_counts[label] = int(class_counts.get(label, 0)) + 1
+        if is_detect_frame:
+            class_counts = session_data.setdefault('class_counts', {})
+            for det in tracked_detections:
+                label = _normalize_label(det.get('class', '')) or 'unknown'
+                class_counts[label] = int(class_counts.get(label, 0)) + 1
 
-        anomaly_counts = session_data.setdefault('anomaly_counts', {})
-        for anomaly in anomalies:
-            label = _normalize_label(anomaly.get('class', '')) or 'unknown'
-            anomaly_counts[label] = int(anomaly_counts.get(label, 0)) + 1
+            anomaly_counts = session_data.setdefault('anomaly_counts', {})
+            for anomaly in anomalies:
+                label = _normalize_label(anomaly.get('class', '')) or 'unknown'
+                anomaly_counts[label] = int(anomaly_counts.get(label, 0)) + 1
 
         graph = session_data.setdefault('graph', {})
         labels = graph.setdefault('labels', [])
@@ -987,11 +1070,11 @@ def _update_upload_video_session(
         inference_series = graph.setdefault('inference_ms', [])
         fps_series = graph.setdefault('fps', [])
 
-        labels.append(str(frames_processed))
+        labels.append(str(frame_number))
         detections_series.append(total_count)
         anomalies_series.append(anomaly_count)
         persons_series.append(int(metrics.get('person_count', 0)))
-        weapons_series.append(int(metrics.get('weapon_count', 0)))
+        weapons_series.append(weapon_count)
         objects_series.append(int(metrics.get('object_count', 0)))
         inference_series.append(round(inference_ms, 2))
         fps_series.append(round(stream_fps, 2))
@@ -1018,6 +1101,76 @@ def _finalize_upload_video_session(video_id: str, status: str = 'completed', err
         session_data['updated_at'] = time.time()
         if error_message:
             session_data['error'] = error_message
+
+
+# Night Shield fix: Read consistent metadata for uploaded videos before/while processing.
+def _read_video_metadata(video_path: str) -> dict:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        try:
+            cap.release()
+        except Exception:
+            pass
+        raise ValueError('Could not open video file for metadata.')
+
+    raw_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+
+    native_fps = raw_fps if 0.0 < raw_fps <= 120.0 else 25.0
+    duration_sec = int(frame_count / native_fps) if native_fps > 0 and frame_count > 0 else 0
+
+    return {
+        'fps': float(native_fps),
+        'width': int(width),
+        'height': int(height),
+        'frame_count': int(frame_count),
+        'duration_sec': int(duration_sec),
+    }
+
+
+# Night Shield fix: Persist uploaded-video summary metrics to DB once processing ends.
+def _save_upload_video_summary_db(video_id: str) -> None:
+    with upload_video_sessions_lock:
+        session_data = deepcopy(upload_video_sessions.get(video_id))
+
+    if not session_data:
+        return
+
+    if bool(session_data.get('summary_saved', False)):
+        return
+
+    frames_processed = int(session_data.get('frames_processed', 0))
+    if frames_processed <= 0:
+        return
+
+    summary_payload = {
+        'video_id': str(session_data.get('video_id', video_id)),
+        'video_filename': str(session_data.get('video_name', 'uploaded_video')),
+        'frames_processed': frames_processed,
+        'total_detections': int(session_data.get('total_detections', 0)),
+        'weapon_detections': int(session_data.get('weapon_detections_total', 0)),
+        'duration_sec': round(float(session_data.get('duration_sec', 0.0) or 0.0), 2),
+        'status': str(session_data.get('status', 'completed')),
+    }
+
+    try:
+        log_surveillance_event_db({
+            'camera_id': 1,
+            'event_type': 'upload_video_summary',
+            'severity': 'low',
+            'description': json.dumps(summary_payload),
+            'image_path': None,
+            'video_path': session_data.get('absolute_video_path'),
+        })
+        with upload_video_sessions_lock:
+            if video_id in upload_video_sessions:
+                upload_video_sessions[video_id]['summary_saved'] = True
+                upload_video_sessions[video_id]['updated_at'] = time.time()
+    except Exception as exc:
+        print(f"[UPLOAD] Failed to save upload summary: {exc}")
 
 
 def _bbox_iou(box_a, box_b) -> float:
@@ -2159,6 +2312,40 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
             _finalize_upload_video_session(upload_video_id, status='failed', error_message='Could not open video source.')
         return
 
+    is_upload_video = bool(upload_video_id)
+
+    # Night Shield fix: Respect original video FPS unless VIDEO_PLAYBACK_FPS override is provided.
+    raw_native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    native_fps = raw_native_fps if 0.0 < raw_native_fps <= 120.0 else 25.0
+    playback_fps = native_fps
+    if 0.0 < float(VIDEO_PLAYBACK_FPS) <= 120.0:
+        playback_fps = float(VIDEO_PLAYBACK_FPS)
+    frame_delay = 1.0 / max(1e-6, playback_fps)
+
+    total_video_frames = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+    source_width = max(0, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0))
+    source_height = max(0, int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0))
+    source_duration_sec = (total_video_frames / native_fps) if native_fps > 0 and total_video_frames > 0 else 0.0
+
+    detect_every = max(1, int(VIDEO_DETECT_EVERY)) if is_upload_video else 1
+    enhance_video_frames = bool(is_upload_video and VIDEO_ENHANCE)
+
+    if is_upload_video:
+        _set_upload_video_session_metadata(
+            upload_video_id,
+            {
+                'native_fps': native_fps,
+                'playback_fps': playback_fps,
+                'frame_delay_sec': frame_delay,
+                'frame_width': source_width,
+                'frame_height': source_height,
+                'total_frames': total_video_frames,
+                'duration_sec': source_duration_sec,
+                'detect_every': detect_every,
+                'video_enhance': enhance_video_frames,
+            },
+        )
+
     frame_state = {'frame': None, 'seq': 0}
     frame_lock = threading.Lock()
     frame_event = threading.Event()
@@ -2192,22 +2379,40 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
     def capture_worker() -> None:
         global prev_frame
+        local_frame_counter = 0
+        enhanced_keyframe_cache = None
         while not stop_event.is_set() and cap.isOpened():
             try:
-                # Skip/grab frames without decoding all of them to reduce processing backlog.
-                for _ in range(STREAM_GRAB_SKIP):
-                    if not cap.grab():
-                        break
+                loop_start = time.time()
+
+                # Skip/grab frames only for live camera to keep upload playback frame-accurate.
+                if not is_upload_video:
+                    for _ in range(STREAM_GRAB_SKIP):
+                        if not cap.grab():
+                            break
 
                 ret, frame = cap.read()
                 if not ret:
                     capture_failed.set()
                     break
 
+                local_frame_counter += 1
+
+                # Night Shield fix: Optional enhancement for uploaded video runs only on sparse keyframes.
+                if enhance_video_frames and (local_frame_counter % 30 == 0):
+                    try:
+                        enhanced_keyframe_cache = enhance_image(frame)
+                        frame = enhanced_keyframe_cache
+                    except Exception as exc:
+                        print(f"[UPLOAD] Keyframe enhancement failed: {exc}")
+
                 frame = cv2.resize(frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
                 with frame_lock:
                     frame_state['frame'] = frame
-                    frame_state['seq'] = int(frame_state['seq']) + 1
+                    if is_upload_video:
+                        frame_state['seq'] = int(local_frame_counter)
+                    else:
+                        frame_state['seq'] = int(frame_state['seq']) + 1
                     current_seq = int(frame_state['seq'])
                 frame_event.set()
 
@@ -2216,6 +2421,13 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
                 if prev_frame is None:
                     prev_frame = frame.copy()
+
+                # Night Shield fix: Throttle uploaded-file playback to match source (or VIDEO_PLAYBACK_FPS override).
+                if is_upload_video:
+                    elapsed = time.time() - loop_start
+                    sleep_time = frame_delay - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
             except Exception as exc:
                 print(f"Capture error: {exc}")
                 capture_failed.set()
@@ -2225,6 +2437,10 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
         local_prev_frame = None
         last_detection_ts = 0.0
         last_inference_ms = 0.0
+        last_tracked_detections = []
+        last_anomalies = []
+        last_counts = {'person': 0, 'weapon': 0, 'object': 0}
+        last_detect_seq = 0
 
         while not stop_event.is_set() and not capture_failed.is_set():
             try:
@@ -2243,7 +2459,11 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                     pass
             local_prev_frame = pending_frame.copy()
 
-            if (now - last_detection_ts) < DETECTION_MIN_INTERVAL_SEC:
+            should_run_detection = True
+            if is_upload_video:
+                should_run_detection = (int(source_seq) == 1) or (int(source_seq) % int(detect_every) == 0)
+
+            if (not is_upload_video) and ((now - last_detection_ts) < DETECTION_MIN_INTERVAL_SEC):
                 tracked_detections = tracker.get_active_tracks(now=now)
                 tracked_detections = _annotate_weapon_confirmation(tracked_detections, camera_id=1)
                 anomalies = _collect_anomaly_detections(tracked_detections)
@@ -2259,6 +2479,28 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                         'object_count': counts['object'],
                         'source_seq': source_seq,
                         'updated_at': now,
+                        'is_detect_frame': False,
+                    },
+                })
+                continue
+
+            if is_upload_video and (not should_run_detection):
+                tracked_detections = [dict(det) for det in last_tracked_detections]
+                anomalies = [dict(item) for item in last_anomalies]
+                counts = dict(last_counts)
+                _queue_replace(detection_result_queue, {
+                    'tracked': tracked_detections,
+                    'anomalies': anomalies,
+                    'meta': {
+                        'inference_ms': float(last_inference_ms),
+                        'total_count': len(tracked_detections),
+                        'person_count': int(counts.get('person', 0)),
+                        'weapon_count': int(counts.get('weapon', 0)),
+                        'object_count': int(counts.get('object', 0)),
+                        'source_seq': source_seq,
+                        'updated_at': now,
+                        'is_detect_frame': False,
+                        'detect_source_seq': int(last_detect_seq),
                     },
                 })
                 continue
@@ -2268,7 +2510,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 pending_frame,
                 backend_override=STREAM_DETECTION_BACKEND,
                 camera_id=1,
-                allow_weapon_skip=True,
+                allow_weapon_skip=not is_upload_video,
                 frame_seq=source_seq,
             )
             lane_results = _run_detection_lanes(raw_detections)
@@ -2279,6 +2521,10 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
             inference_ms = (time.perf_counter() - infer_start) * 1000.0
             last_inference_ms = inference_ms
             last_detection_ts = now
+            last_tracked_detections = [dict(det) for det in tracked_detections]
+            last_anomalies = [dict(item) for item in anomalies]
+            last_counts = _count_detection_groups(tracked_detections)
+            last_detect_seq = int(source_seq)
 
             emitted_anomalies = []
             for anomaly in anomalies:
@@ -2336,7 +2582,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                         )
                         threading.Thread(target=send_email_alert, args=(subject, body, to, anomaly_image_path), daemon=True).start()
 
-            counts = _count_detection_groups(tracked_detections)
+            counts = dict(last_counts)
             _queue_replace(detection_result_queue, {
                 'tracked': tracked_detections,
                 'anomalies': anomalies,
@@ -2348,6 +2594,8 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                     'object_count': counts['object'],
                     'source_seq': source_seq,
                     'updated_at': now,
+                    'is_detect_frame': True,
+                    'detect_source_seq': int(source_seq),
                 },
             })
 
@@ -2374,6 +2622,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
     last_sent_seq = -1
     last_emit_perf = time.perf_counter()
+    processing_started_at = time.time()
     fps_history = deque(maxlen=STREAM_METRIC_HISTORY)
     infer_history = deque(maxlen=STREAM_METRIC_HISTORY)
     total_history = deque(maxlen=STREAM_METRIC_HISTORY)
@@ -2431,11 +2680,23 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
             weapon_count = int(detection_meta.get('weapon_count', 0))
             object_count = int(detection_meta.get('object_count', max(0, total_count - person_count - weapon_count)))
             inference_ms = float(detection_meta.get('inference_ms', 0.0))
+            is_detect_frame = bool(detection_meta.get('is_detect_frame', True))
+
+            elapsed_sec = max(0.0, time.time() - processing_started_at)
+            eta_sec = 0.0
+            if is_upload_video and total_video_frames > 0:
+                remaining_frames = max(0, int(total_video_frames) - int(current_seq))
+                eta_fps = stream_fps if stream_fps > 0 else playback_fps
+                eta_sec = (remaining_frames / max(0.001, eta_fps)) if remaining_frames > 0 else 0.0
 
             if upload_video_id:
                 _update_upload_video_session(
                     upload_video_id,
                     {
+                        'frame_number': int(current_seq),
+                        'total_frames': int(total_video_frames),
+                        'elapsed_sec': float(elapsed_sec),
+                        'eta_sec': float(eta_sec),
                         'total_count': total_count,
                         'person_count': person_count,
                         'weapon_count': weapon_count,
@@ -2443,6 +2704,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                         'anomaly_count': len(rendered_anomalies),
                         'inference_ms': inference_ms,
                         'fps': stream_fps,
+                        'is_detect_frame': bool(is_detect_frame),
                     },
                     tracked_detections,
                     rendered_anomalies,
@@ -2485,7 +2747,14 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 print(f"JPEG encode failed: {exc}")
                 frame_bytes = b''
 
-            yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            multipart_header = (
+                b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n'
+                + f"X-Frame-Number: {int(current_seq)}\r\n".encode('utf-8')
+                + f"X-Total-Frames: {int(total_video_frames)}\r\n".encode('utf-8')
+                + b'\r\n'
+            )
+            yield (multipart_header + frame_bytes + b'\r\n')
 
             prev_frame = frame.copy()
     finally:
@@ -2502,15 +2771,24 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 session_data = upload_video_sessions.get(upload_video_id, {})
                 processed_frames = int(session_data.get('frames_processed', 0))
                 already_failed = str(session_data.get('status', '')) == 'failed'
+                stop_requested = bool(session_data.get('stop_requested', False))
 
-            if processed_frames <= 0:
+            if processed_frames <= 0 and not stop_requested:
                 _finalize_upload_video_session(
                     upload_video_id,
                     status='failed',
                     error_message='No frames were processed from the uploaded video.',
                 )
+            elif stop_requested and not already_failed:
+                _finalize_upload_video_session(upload_video_id, status='stopped')
             elif not already_failed:
                 _finalize_upload_video_session(upload_video_id, status='completed')
+
+            # Night Shield fix: Save uploaded-video processing summary after completion/stop.
+            _save_upload_video_summary_db(upload_video_id)
+
+            with upload_video_stop_events_lock:
+                upload_video_stop_events.pop(upload_video_id, None)
 
 # Route for home page
 @app.route('/')
@@ -2579,6 +2857,8 @@ def upload_video():
             stored_name=stored_name,
             absolute_path=file_path,
         )
+        # Night Shield fix: Keep last uploaded video id in session for /video_info and /video_stats fallback.
+        session['last_upload_video_id'] = video_id
         return redirect(url_for('upload', video_id=video_id))
 
     return redirect(url_for('upload'))
@@ -2603,11 +2883,147 @@ def upload_video_feed():
         _finalize_upload_video_session(video_id, status='failed', error_message='Uploaded video file is missing.')
         return 'Uploaded video file not found', 404
 
-    stop_event = threading.Event()
+    # Night Shield fix: Reuse a per-upload stop event so UI STOP can halt stream processing cleanly.
+    with upload_video_stop_events_lock:
+        stop_event = upload_video_stop_events.get(video_id)
+        if stop_event is None:
+            stop_event = threading.Event()
+            upload_video_stop_events[video_id] = stop_event
+        else:
+            stop_event.clear()
+
+    with upload_video_sessions_lock:
+        if video_id in upload_video_sessions:
+            upload_video_sessions[video_id]['stop_requested'] = False
+            upload_video_sessions[video_id]['updated_at'] = time.time()
+
     return Response(
         video_stream(video_path, stop_event, upload_video_id=video_id),
         mimetype='multipart/x-mixed-replace; boundary=frame',
     )
+
+
+# Night Shield fix: Provide uploaded-video metadata before/while processing so UI can compute expected progress.
+@app.route('/video_info', methods=['POST'])
+def video_info():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    payload = request.get_json(silent=True) or {}
+    video_id = str(
+        payload.get('video_id')
+        or request.form.get('video_id')
+        or request.args.get('video_id')
+        or session.get('last_upload_video_id')
+        or ''
+    ).strip()
+
+    video_path = ''
+    if video_id:
+        with upload_video_sessions_lock:
+            session_data = upload_video_sessions.get(video_id)
+            if session_data:
+                video_path = str(session_data.get('absolute_video_path', '') or '').strip()
+
+    if not video_path:
+        video_path = str(payload.get('filepath') or request.form.get('filepath') or request.args.get('filepath') or '').strip()
+
+    if not video_path or not os.path.exists(video_path):
+        return jsonify({'error': 'Video file not found'}), 404
+
+    try:
+        info = _read_video_metadata(video_path)
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    if video_id:
+        _set_upload_video_session_metadata(
+            video_id,
+            {
+                'native_fps': float(info.get('fps', 0.0)),
+                'playback_fps': float(info.get('fps', 0.0)),
+                'frame_width': int(info.get('width', 0)),
+                'frame_height': int(info.get('height', 0)),
+                'total_frames': int(info.get('frame_count', 0)),
+                'duration_sec': float(info.get('duration_sec', 0)),
+            },
+        )
+
+    return jsonify({
+        'success': True,
+        'video_id': video_id,
+        'fps': float(info.get('fps', 0.0)),
+        'width': int(info.get('width', 0)),
+        'height': int(info.get('height', 0)),
+        'frame_count': int(info.get('frame_count', 0)),
+        'duration_sec': int(info.get('duration_sec', 0)),
+    })
+
+
+# Night Shield fix: Lightweight upload-video runtime stats for progress bar and ETA updates.
+@app.route('/video_stats')
+def video_stats():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    video_id = str(request.args.get('video_id') or session.get('last_upload_video_id') or '').strip()
+    if not video_id:
+        return jsonify({'error': 'Missing video_id'}), 400
+
+    with upload_video_sessions_lock:
+        session_data = deepcopy(upload_video_sessions.get(video_id))
+
+    if not session_data:
+        return jsonify({'error': 'Video session not found'}), 404
+
+    current_frame = int(session_data.get('current_frame', session_data.get('frames_processed', 0)) or 0)
+    total_frames = int(session_data.get('total_frames', 0) or 0)
+    progress_percent = float(session_data.get('progress_percent', 0.0) or 0.0)
+    if total_frames > 0 and progress_percent <= 0.0:
+        progress_percent = min(100.0, (current_frame / total_frames) * 100.0)
+
+    return jsonify({
+        'success': True,
+        'video_id': video_id,
+        'status': str(session_data.get('status', 'ready')),
+        'current_frame': current_frame,
+        'total_frames': total_frames,
+        'progress_percent': round(progress_percent, 2),
+        'processing_fps': round(float(session_data.get('latest_fps', 0.0) or 0.0), 2),
+        'elapsed_sec': round(float(session_data.get('elapsed_sec', 0.0) or 0.0), 2),
+        'eta_sec': round(float(session_data.get('eta_sec', 0.0) or 0.0), 2),
+        'total_detections': int(session_data.get('total_detections', 0)),
+        'weapon_detections': int(session_data.get('weapon_detections_total', 0)),
+    })
+
+
+# Night Shield fix: Stop uploaded-video processing loop without terminating server process.
+@app.route('/video_stop', methods=['POST'])
+def video_stop():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    payload = request.get_json(silent=True) or {}
+    video_id = str(payload.get('video_id') or request.form.get('video_id') or request.args.get('video_id') or '').strip()
+    if not video_id:
+        return jsonify({'error': 'Missing video_id'}), 400
+
+    stop_sent = False
+    with upload_video_stop_events_lock:
+        stop_event = upload_video_stop_events.get(video_id)
+        if stop_event is not None:
+            stop_event.set()
+            stop_sent = True
+
+    with upload_video_sessions_lock:
+        session_data = upload_video_sessions.get(video_id)
+        if session_data:
+            session_data['stop_requested'] = True
+            if str(session_data.get('status', '')) not in {'failed', 'completed', 'stopped'}:
+                session_data['status'] = 'stopping'
+            session_data['updated_at'] = time.time()
+
+    return jsonify({'success': True, 'video_id': video_id, 'stop_requested': bool(stop_sent)})
 
 
 @app.route('/upload_video_summary')
@@ -2644,7 +3060,11 @@ def upload_video_summary():
         'error': str(session_data.get('error', '')),
         'summary': {
             'frames_processed': frames_processed,
+            'current_frame': int(session_data.get('current_frame', frames_processed) or frames_processed),
+            'total_frames': int(session_data.get('total_frames', 0) or 0),
+            'progress_percent': round(float(session_data.get('progress_percent', 0.0) or 0.0), 2),
             'total_detections': total_detections,
+            'weapon_detections': int(session_data.get('weapon_detections_total', 0)),
             'total_anomalies': total_anomalies,
             'peak_detections': int(session_data.get('peak_detections', 0)),
             'peak_anomalies': int(session_data.get('peak_anomalies', 0)),
@@ -2652,6 +3072,8 @@ def upload_video_summary():
             'avg_inference_ms': round(avg_inference_ms, 2),
             'avg_fps': round(avg_fps, 2),
             'duration_sec': round(duration_sec, 2),
+            'elapsed_sec': round(float(session_data.get('elapsed_sec', 0.0) or 0.0), 2),
+            'eta_sec': round(float(session_data.get('eta_sec', 0.0) or 0.0), 2),
             'max_confidence': round(float(session_data.get('max_confidence', 0.0)), 4),
         },
         'context': _build_upload_video_context(session_data),
