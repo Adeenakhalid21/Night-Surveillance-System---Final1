@@ -61,6 +61,34 @@
       color: var(--surface-card-text);
     }
 
+    .mode-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      border: 1px solid var(--surface-card-border);
+      border-radius: 10px;
+      padding: 0.56rem 0.72rem;
+      background: var(--surface-soft-bg);
+      color: var(--surface-card-text);
+      font-size: 0.86rem;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .mode-toggle input[type="checkbox"] {
+      width: 1rem;
+      height: 1rem;
+      accent-color: #2563eb;
+      margin: 0;
+    }
+
+    .mode-hint {
+      margin-top: 0.55rem;
+      font-size: 0.8rem;
+      color: var(--surface-muted-text);
+    }
+
     .btn-primary {
       border: 0;
       border-radius: 9px;
@@ -177,6 +205,13 @@
       margin-bottom: 0.9rem;
     }
 
+    .status-cluster {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
     .status-pill {
       border-radius: 999px;
       font-size: 0.8rem;
@@ -195,6 +230,30 @@
     .status-stopped { background: rgba(148, 163, 184, 0.22); color: #334155; }
     .status-completed { background: rgba(34, 197, 94, 0.18); color: #0d7a37; }
     .status-failed { background: rgba(239, 68, 68, 0.18); color: #9f1d1d; }
+
+    .mode-badge {
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      padding: 0.28rem 0.68rem;
+      letter-spacing: 0.02em;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.32rem;
+      border: 1px solid transparent;
+    }
+
+    .mode-badge-on {
+      background: rgba(14, 165, 233, 0.14);
+      color: #0369a1;
+      border-color: rgba(14, 165, 233, 0.22);
+    }
+
+    .mode-badge-off {
+      background: rgba(148, 163, 184, 0.18);
+      color: #475569;
+      border-color: rgba(148, 163, 184, 0.24);
+    }
 
     .metric-grid {
       display: grid;
@@ -359,8 +418,19 @@
       <section class="upload-card">
         <form class="upload-form" action="{{ url_for('upload_video') }}" method="post" enctype="multipart/form-data">
           <input type="file" name="video" accept=".mp4,.avi,.mov,.mkv" required>
+          <input type="hidden" name="lowlight_video_mode" value="0">
+          <label class="mode-toggle" title="Enhance dark frames before detection">
+            <input
+              type="checkbox"
+              name="lowlight_video_mode"
+              value="1"
+              {% if lowlight_video_mode %}checked{% endif %}
+            >
+            <span>Low-light video mode</span>
+          </label>
           <button class="btn-primary" type="submit">Upload And Analyze</button>
         </form>
+        <p class="mode-hint">Enhances dark frames before detection for night-time footage.</p>
       </section>
 
       {% if video_id %}
@@ -389,7 +459,15 @@
 
         <div class="summary-card">
           <div class="status-row">
-            <span id="status-pill" class="status-pill status-ready">Ready</span>
+            <div class="status-cluster">
+              <span id="status-pill" class="status-pill status-ready">Ready</span>
+              <span
+                id="mode-badge"
+                class="mode-badge {% if lowlight_video_mode %}mode-badge-on{% else %}mode-badge-off{% endif %}"
+              >
+                {% if lowlight_video_mode %}Low-light ON{% else %}Low-light OFF{% endif %}
+              </span>
+            </div>
             <span id="video-name" style="font-size: 0.85rem; opacity: 0.85;">{{ (video.video_name if video else 'uploaded_video') }}</span>
           </div>
 
@@ -510,10 +588,15 @@
     const summaryCanvas = document.getElementById('summary-chart');
     const stopBtn = document.getElementById('stop-video-btn');
     const themeToggleBtn = document.querySelector('.theme-toggler');
+    const initialLowlightMode = {{ lowlight_video_mode | tojson }};
+    const summaryPollMs = Math.max(2000, Math.round(Number({{ upload_summary_poll_seconds | tojson }}) * 1000));
+    const statsPollMs = Math.max(1000, Math.round(Number({{ upload_stats_poll_seconds | tojson }}) * 1000));
 
     let pollTimer = null;
     let statsTimer = null;
     let latestGraphSnapshot = null;
+    let summaryRequestInFlight = false;
+    let statsRequestInFlight = false;
 
     function statusClass(status) {
       if (status === 'processing') return 'status-pill status-processing';
@@ -541,6 +624,13 @@
       if (stopBtn) {
         stopBtn.disabled = (status === 'completed' || status === 'failed' || status === 'stopped');
       }
+    }
+
+    function setModeBadge(isLowlightMode) {
+      const badge = document.getElementById('mode-badge');
+      if (!badge) return;
+      badge.className = `mode-badge ${isLowlightMode ? 'mode-badge-on' : 'mode-badge-off'}`;
+      badge.textContent = isLowlightMode ? 'Low-light ON' : 'Low-light OFF';
     }
 
     function formatNumber(value, fallback = '0') {
@@ -623,7 +713,8 @@
 
         const videoMeta = document.getElementById('video-meta');
         if (videoMeta) {
-          videoMeta.textContent = `Source: ${data.width}x${data.height} | FPS: ${Number(data.fps || 0).toFixed(2)} | Frames: ${data.frame_count} | Duration: ${formatClock(data.duration_sec || 0)}`;
+          const modeLabel = data.lowlight_video_mode ? 'Low-light: ON' : 'Low-light: OFF';
+          videoMeta.textContent = `Source: ${data.width}x${data.height} | FPS: ${Number(data.fps || 0).toFixed(2)} | Frames: ${data.frame_count} | Duration: ${formatClock(data.duration_sec || 0)} | ${modeLabel}`;
         }
       } catch (err) {
         console.warn('Video info fetch failed:', err);
@@ -632,6 +723,8 @@
 
     async function fetchVideoStats() {
       if (!statsUrl) return;
+      if (statsRequestInFlight) return;
+      statsRequestInFlight = true;
       try {
         const response = await fetch(statsUrl, { cache: 'no-store' });
         const data = await response.json();
@@ -641,6 +734,7 @@
         }
 
         setStatus(data.status || 'ready', '');
+        setModeBadge(Boolean(data.lowlight_video_mode));
         updateProgressUI(data);
 
         if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
@@ -651,6 +745,8 @@
         }
       } catch (err) {
         console.warn('Video stats fetch failed:', err);
+      } finally {
+        statsRequestInFlight = false;
       }
     }
 
@@ -675,6 +771,8 @@
     if (stopBtn) {
       stopBtn.addEventListener('click', requestVideoStop);
     }
+
+    setModeBadge(Boolean(initialLowlightMode));
 
     function renderCountList(targetId, items, emptyText) {
       const listNode = document.getElementById(targetId);
@@ -816,6 +914,8 @@
 
     async function fetchSummary() {
       if (!summaryUrl) return;
+      if (summaryRequestInFlight) return;
+      summaryRequestInFlight = true;
 
       try {
         const response = await fetch(summaryUrl, { cache: 'no-store' });
@@ -888,6 +988,8 @@
           clearInterval(statsTimer);
           statsTimer = null;
         }
+      } finally {
+        summaryRequestInFlight = false;
       }
     }
 
@@ -895,9 +997,13 @@
       fetchVideoInfo();
       fetchVideoStats();
       fetchSummary();
-      pollTimer = setInterval(fetchSummary, 2000);
-      statsTimer = setInterval(fetchVideoStats, 2000);
-      window.addEventListener('resize', () => fetchSummary());
+      pollTimer = setInterval(fetchSummary, summaryPollMs);
+      statsTimer = setInterval(fetchVideoStats, statsPollMs);
+      window.addEventListener('resize', () => {
+        if (latestGraphSnapshot) {
+          drawSummaryChart(latestGraphSnapshot);
+        }
+      });
     }
 
     if (themeToggleBtn) {

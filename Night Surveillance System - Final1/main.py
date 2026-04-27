@@ -5,11 +5,14 @@ from flask import Flask, render_template, Response, request, jsonify, redirect, 
 import sqlite3
 import re, os
 import json
+import textwrap
 from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
 from enhancement import (
     analyze_lowlight_improvement,
+    brighten_lowlight,
+    denoise,
     enhance_image,
     enhance_image_with_meta,
     enhance_night_image,
@@ -145,23 +148,31 @@ hf_object_model = None
 hf_detector_task_resolved = 'object-detection'
 hf_candidate_labels_cache = None
 hf_backend_failed = False
+model_load_lock = threading.Lock()
+weapon_model_load_lock = threading.Lock()
+phone_model_load_lock = threading.Lock()
+upload_pipeline_warmup_lock = threading.Lock()
+upload_pipeline_warmup_started = False
 
 def get_model():
     global model
     if model is not None:
         return model
-    try:
-        from ultralytics import YOLO
-        print(f"[YOLO] Loading general model from {weights_path}...", flush=True)
-        model = YOLO(weights_path)
-        print("[YOLO] General model ready", flush=True)
-        return model
-    except KeyboardInterrupt:
-        print("[YOLO] Load interrupted")
-        return None
-    except Exception as e:
-        print(f"[YOLO] Failed to load: {e}")
-        return None
+    with model_load_lock:
+        if model is not None:
+            return model
+        try:
+            from ultralytics import YOLO
+            print(f"[YOLO] Loading general model from {weights_path}...", flush=True)
+            model = YOLO(weights_path)
+            print("[YOLO] General model ready", flush=True)
+            return model
+        except KeyboardInterrupt:
+            print("[YOLO] Load interrupted")
+            return None
+        except Exception as e:
+            print(f"[YOLO] Failed to load: {e}")
+            return None
 
 
 def get_weapon_model():
@@ -173,18 +184,21 @@ def get_weapon_model():
         return None
     if weapon_model is not None:
         return weapon_model
-    try:
-        from ultralytics import YOLO
-        print(f"[YOLO] Loading weapon model from {weapon_weights_path}...", flush=True)
-        weapon_model = YOLO(weapon_weights_path)
-        print("[YOLO] Weapon model ready", flush=True)
-        return weapon_model
-    except KeyboardInterrupt:
-        print("[YOLO] Weapon model load interrupted")
-        return None
-    except Exception as e:
-        print(f"[YOLO] Weapon model unavailable: {e}")
-        return None
+    with weapon_model_load_lock:
+        if weapon_model is not None:
+            return weapon_model
+        try:
+            from ultralytics import YOLO
+            print(f"[YOLO] Loading weapon model from {weapon_weights_path}...", flush=True)
+            weapon_model = YOLO(weapon_weights_path)
+            print("[YOLO] Weapon model ready", flush=True)
+            return weapon_model
+        except KeyboardInterrupt:
+            print("[YOLO] Weapon model load interrupted")
+            return None
+        except Exception as e:
+            print(f"[YOLO] Weapon model unavailable: {e}")
+            return None
 
 
 def get_phone_model():
@@ -193,18 +207,44 @@ def get_phone_model():
         return None
     if phone_model is not None:
         return phone_model
+    with phone_model_load_lock:
+        if phone_model is not None:
+            return phone_model
+        try:
+            from ultralytics import YOLO
+            print(f"[YOLO] Loading phone model from {phone_weights_path}...", flush=True)
+            phone_model = YOLO(phone_weights_path)
+            print("[YOLO] Phone model ready", flush=True)
+            return phone_model
+        except KeyboardInterrupt:
+            print("[YOLO] Phone model load interrupted")
+            return None
+        except Exception as e:
+            print(f"[YOLO] Phone model unavailable: {e}")
+            return None
+
+
+def _warmup_upload_video_pipeline() -> None:
     try:
-        from ultralytics import YOLO
-        print(f"[YOLO] Loading phone model from {phone_weights_path}...", flush=True)
-        phone_model = YOLO(phone_weights_path)
-        print("[YOLO] Phone model ready", flush=True)
-        return phone_model
-    except KeyboardInterrupt:
-        print("[YOLO] Phone model load interrupted")
-        return None
-    except Exception as e:
-        print(f"[YOLO] Phone model unavailable: {e}")
-        return None
+        get_model()
+        if ENABLE_WEAPON_MODEL:
+            get_weapon_model()
+        get_phone_model()
+    except Exception as exc:
+        print(f"[UPLOAD] Upload pipeline warmup failed: {exc}")
+
+
+def _start_upload_video_pipeline_warmup() -> None:
+    global upload_pipeline_warmup_started
+    with upload_pipeline_warmup_lock:
+        if upload_pipeline_warmup_started:
+            return
+        upload_pipeline_warmup_started = True
+    threading.Thread(
+        target=_warmup_upload_video_pipeline,
+        name='upload-pipeline-warmup',
+        daemon=True,
+    ).start()
 
 
 def get_hf_detector_pipe():
@@ -598,6 +638,12 @@ except Exception:
 VIDEO_DETECT_EVERY = max(1, int(float(os.getenv('VIDEO_DETECT_EVERY', '5'))))
 # Night Shield fix: Optional enhancement on uploaded videos (disabled by default for real-time playback).
 VIDEO_ENHANCE = str(os.getenv('VIDEO_ENHANCE', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+# Night Shield fix: Per-upload low-light mode defaults on so enhanced detection is available without extra setup.
+UPLOAD_LOWLIGHT_MODE_DEFAULT = str(os.getenv('UPLOAD_LOWLIGHT_MODE_DEFAULT', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+UPLOAD_VIDEO_REALTIME_PLAYBACK = str(os.getenv('UPLOAD_VIDEO_REALTIME_PLAYBACK', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+UPLOAD_VIDEO_FAST_ENHANCE = str(os.getenv('UPLOAD_VIDEO_FAST_ENHANCE', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+UPLOAD_SUMMARY_POLL_SECONDS = max(2.0, float(os.getenv('UPLOAD_SUMMARY_POLL_SECONDS', '5')))
+UPLOAD_STATS_POLL_SECONDS = max(1.0, float(os.getenv('UPLOAD_STATS_POLL_SECONDS', '2.5')))
 LOWLIGHT_DETECTION_MAX_SIDE = max(480, int(float(os.getenv('LOWLIGHT_DETECTION_MAX_SIDE', '1280'))))
 LOWLIGHT_FUSION_IOU = float(os.getenv('LOWLIGHT_FUSION_IOU', '0.45'))
 LOWLIGHT_FUSION_CONF_BOOST = float(os.getenv('LOWLIGHT_FUSION_CONF_BOOST', '0.06'))
@@ -881,7 +927,15 @@ def _build_upload_video_context(session_data: dict) -> dict:
     }
 
 
-def _register_upload_video_session(video_id: str, original_name: str, stored_name: str, absolute_path: str) -> None:
+def _register_upload_video_session(
+    video_id: str,
+    original_name: str,
+    stored_name: str,
+    absolute_path: str,
+    lowlight_video_mode: bool | None = None,
+) -> None:
+    selected_lowlight_mode = bool(UPLOAD_LOWLIGHT_MODE_DEFAULT if lowlight_video_mode is None else lowlight_video_mode)
+    selected_video_enhance = bool(selected_lowlight_mode or VIDEO_ENHANCE)
     with upload_video_sessions_lock:
         upload_video_sessions[video_id] = {
             'video_id': video_id,
@@ -903,11 +957,13 @@ def _register_upload_video_session(video_id: str, original_name: str, stored_nam
             'frame_height': 0,
             'duration_sec': 0.0,
             'detect_every': int(VIDEO_DETECT_EVERY),
-            'video_enhance': bool(VIDEO_ENHANCE),
+            'lowlight_video_mode': selected_lowlight_mode,
+            'video_enhance': selected_video_enhance,
             'elapsed_sec': 0.0,
             'eta_sec': 0.0,
             'latest_fps': 0.0,
             'frames_processed': 0,
+            'detection_frames_processed': 0,
             'total_detections': 0,
             'total_anomalies': 0,
             'weapon_detections_total': 0,
@@ -941,6 +997,7 @@ def _reset_upload_video_session_metrics(session_data: dict) -> None:
     session_data['eta_sec'] = 0.0
     session_data['latest_fps'] = 0.0
     session_data['frames_processed'] = 0
+    session_data['detection_frames_processed'] = 0
     session_data['total_detections'] = 0
     session_data['total_anomalies'] = 0
     session_data['weapon_detections_total'] = 0
@@ -993,7 +1050,21 @@ def _set_upload_video_session_metadata(video_id: str, metadata: dict) -> None:
         session_data['total_frames'] = max(0, int(metadata.get('total_frames', session_data.get('total_frames', 0)) or 0))
         session_data['duration_sec'] = max(0.0, float(metadata.get('duration_sec', session_data.get('duration_sec', 0.0)) or 0.0))
         session_data['detect_every'] = max(1, int(metadata.get('detect_every', session_data.get('detect_every', VIDEO_DETECT_EVERY)) or VIDEO_DETECT_EVERY))
-        session_data['video_enhance'] = bool(metadata.get('video_enhance', session_data.get('video_enhance', VIDEO_ENHANCE)))
+        session_data['lowlight_video_mode'] = bool(
+            metadata.get(
+                'lowlight_video_mode',
+                session_data.get(
+                    'lowlight_video_mode',
+                    session_data.get('video_enhance', UPLOAD_LOWLIGHT_MODE_DEFAULT),
+                ),
+            )
+        )
+        session_data['video_enhance'] = bool(
+            metadata.get(
+                'video_enhance',
+                session_data.get('video_enhance', session_data['lowlight_video_mode']),
+            )
+        )
         session_data['updated_at'] = time.time()
 
 
@@ -1036,15 +1107,17 @@ def _update_upload_video_session(
             session_data['progress_percent'] = 0.0
 
         if is_detect_frame:
+            session_data['detection_frames_processed'] = int(session_data.get('detection_frames_processed', 0)) + 1
             session_data['total_detections'] = int(session_data.get('total_detections', 0)) + total_count
             session_data['total_anomalies'] = int(session_data.get('total_anomalies', 0)) + anomaly_count
             session_data['weapon_detections_total'] = int(session_data.get('weapon_detections_total', 0)) + max(0, weapon_count)
 
         session_data['peak_detections'] = max(int(session_data.get('peak_detections', 0)), total_count)
         session_data['peak_anomalies'] = max(int(session_data.get('peak_anomalies', 0)), anomaly_count)
-        session_data['sum_inference_ms'] = float(session_data.get('sum_inference_ms', 0.0)) + inference_ms
         session_data['sum_fps'] = float(session_data.get('sum_fps', 0.0)) + stream_fps
         session_data['latest_fps'] = max(0.0, stream_fps)
+        if is_detect_frame:
+            session_data['sum_inference_ms'] = float(session_data.get('sum_inference_ms', 0.0)) + inference_ms
 
         max_conf = max([float(det.get('confidence', 0.0)) for det in tracked_detections] + [0.0])
         session_data['max_confidence'] = max(float(session_data.get('max_confidence', 0.0)), max_conf)
@@ -1060,33 +1133,34 @@ def _update_upload_video_session(
                 label = _normalize_label(anomaly.get('class', '')) or 'unknown'
                 anomaly_counts[label] = int(anomaly_counts.get(label, 0)) + 1
 
-        graph = session_data.setdefault('graph', {})
-        labels = graph.setdefault('labels', [])
-        detections_series = graph.setdefault('detections', [])
-        anomalies_series = graph.setdefault('anomalies', [])
-        persons_series = graph.setdefault('persons', [])
-        weapons_series = graph.setdefault('weapons', [])
-        objects_series = graph.setdefault('objects', [])
-        inference_series = graph.setdefault('inference_ms', [])
-        fps_series = graph.setdefault('fps', [])
+        if is_detect_frame:
+            graph = session_data.setdefault('graph', {})
+            labels = graph.setdefault('labels', [])
+            detections_series = graph.setdefault('detections', [])
+            anomalies_series = graph.setdefault('anomalies', [])
+            persons_series = graph.setdefault('persons', [])
+            weapons_series = graph.setdefault('weapons', [])
+            objects_series = graph.setdefault('objects', [])
+            inference_series = graph.setdefault('inference_ms', [])
+            fps_series = graph.setdefault('fps', [])
 
-        labels.append(str(frame_number))
-        detections_series.append(total_count)
-        anomalies_series.append(anomaly_count)
-        persons_series.append(int(metrics.get('person_count', 0)))
-        weapons_series.append(weapon_count)
-        objects_series.append(int(metrics.get('object_count', 0)))
-        inference_series.append(round(inference_ms, 2))
-        fps_series.append(round(stream_fps, 2))
+            labels.append(str(frame_number))
+            detections_series.append(total_count)
+            anomalies_series.append(anomaly_count)
+            persons_series.append(int(metrics.get('person_count', 0)))
+            weapons_series.append(weapon_count)
+            objects_series.append(int(metrics.get('object_count', 0)))
+            inference_series.append(round(inference_ms, 2))
+            fps_series.append(round(stream_fps, 2))
 
-        _trim_graph_series(labels)
-        _trim_graph_series(detections_series)
-        _trim_graph_series(anomalies_series)
-        _trim_graph_series(persons_series)
-        _trim_graph_series(weapons_series)
-        _trim_graph_series(objects_series)
-        _trim_graph_series(inference_series)
-        _trim_graph_series(fps_series)
+            _trim_graph_series(labels)
+            _trim_graph_series(detections_series)
+            _trim_graph_series(anomalies_series)
+            _trim_graph_series(persons_series)
+            _trim_graph_series(weapons_series)
+            _trim_graph_series(objects_series)
+            _trim_graph_series(inference_series)
+            _trim_graph_series(fps_series)
 
         session_data['updated_at'] = time.time()
 
@@ -1146,25 +1220,59 @@ def _save_upload_video_summary_db(video_id: str) -> None:
     if frames_processed <= 0:
         return
 
+    total_detections = int(session_data.get('total_detections', 0))
+    total_anomalies = int(session_data.get('total_anomalies', 0))
+    sum_inference_ms = float(session_data.get('sum_inference_ms', 0.0) or 0.0)
+    sum_fps = float(session_data.get('sum_fps', 0.0) or 0.0)
+    avg_detections_per_frame = round((total_detections / frames_processed), 3) if frames_processed else 0.0
+    avg_inference_ms = round((sum_inference_ms / frames_processed), 2) if frames_processed else 0.0
+    avg_fps = round((sum_fps / frames_processed), 2) if frames_processed else 0.0
+
     summary_payload = {
         'video_id': str(session_data.get('video_id', video_id)),
         'video_filename': str(session_data.get('video_name', 'uploaded_video')),
+        'status': str(session_data.get('status', 'completed')),
+        'session_created_at': float(session_data.get('created_at', 0.0) or 0.0),
+        'session_started_at': float(session_data.get('started_at', 0.0) or 0.0),
+        'session_completed_at': float(session_data.get('completed_at', 0.0) or 0.0),
+        'native_fps': round(float(session_data.get('native_fps', 0.0) or 0.0), 3),
+        'playback_fps': round(float(session_data.get('playback_fps', 0.0) or 0.0), 3),
+        'frame_size': f"{int(session_data.get('frame_width', 0) or 0)}x{int(session_data.get('frame_height', 0) or 0)}",
+        'total_frames_expected': int(session_data.get('total_frames', 0) or 0),
         'frames_processed': frames_processed,
-        'total_detections': int(session_data.get('total_detections', 0)),
+        'total_detections': total_detections,
+        'total_anomalies': total_anomalies,
+        'peak_detections': int(session_data.get('peak_detections', 0) or 0),
+        'peak_anomalies': int(session_data.get('peak_anomalies', 0) or 0),
+        'avg_detections_per_frame': avg_detections_per_frame,
+        'avg_inference_ms': avg_inference_ms,
+        'avg_fps': avg_fps,
+        'max_confidence': round(float(session_data.get('max_confidence', 0.0) or 0.0), 4),
         'weapon_detections': int(session_data.get('weapon_detections_total', 0)),
         'duration_sec': round(float(session_data.get('duration_sec', 0.0) or 0.0), 2),
-        'status': str(session_data.get('status', 'completed')),
+        'elapsed_sec': round(float(session_data.get('elapsed_sec', 0.0) or 0.0), 2),
+        'eta_sec': round(float(session_data.get('eta_sec', 0.0) or 0.0), 2),
+        'detect_every': int(session_data.get('detect_every', VIDEO_DETECT_EVERY) or VIDEO_DETECT_EVERY),
+        'lowlight_video_mode': bool(
+            session_data.get('lowlight_video_mode', session_data.get('video_enhance', False))
+        ),
+        'video_enhance': bool(session_data.get('video_enhance', False)),
+        'top_detected_classes': _top_counts(session_data.get('class_counts', {}), limit=6),
+        'top_anomaly_classes': _top_counts(session_data.get('anomaly_counts', {}), limit=6),
     }
 
     try:
-        log_surveillance_event_db({
+        saved = log_surveillance_event_db({
             'camera_id': 1,
             'event_type': 'upload_video_summary',
             'severity': 'low',
-            'description': json.dumps(summary_payload),
+            'description': 'Uploaded video session summary saved.',
+            'details': summary_payload,
             'image_path': None,
             'video_path': session_data.get('absolute_video_path'),
         })
+        if not saved:
+            raise RuntimeError('Failed to persist upload summary event')
         with upload_video_sessions_lock:
             if video_id in upload_video_sessions:
                 upload_video_sessions[video_id]['summary_saved'] = True
@@ -1665,6 +1773,21 @@ def _prepare_lowlight_detection_frame(enhanced_bgr: np.ndarray, reference_bgr: n
     return detection_frame, scale_x, scale_y
 
 
+def _enhance_upload_video_frame_fast(frame_bgr: np.ndarray) -> np.ndarray:
+    if frame_bgr is None or frame_bgr.size == 0:
+        raise ValueError('Upload video frame is empty')
+
+    enhanced = brighten_lowlight(frame_bgr)
+    if str(os.getenv('ENABLE_DENOISE', '1')).strip() == '1':
+        frame_pixels = int(frame_bgr.shape[0]) * int(frame_bgr.shape[1])
+        if frame_pixels <= (STREAM_FRAME_WIDTH * STREAM_FRAME_HEIGHT):
+            try:
+                enhanced = denoise(enhanced)
+            except Exception:
+                pass
+    return enhanced
+
+
 def _dedupe_detections_same_class(detections: list[dict], iou_threshold: float = 0.52) -> list[dict]:
     if not detections:
         return []
@@ -2068,6 +2191,7 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
     # Save at most one frame snapshot per processed frame when needed.
     frame_snapshot_path = None
     snapshot_dir_ready = False
+    frame_h, frame_w = frame.shape[:2]
 
     for detection in detections:
         x1, y1, x2, y2 = detection['bbox']
@@ -2189,7 +2313,26 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
                 'bbox_width': x2 - x1,
                 'bbox_height': y2 - y1,
                 'image_path': detection_image_path,
-                'dataset_id': 1
+                'dataset_id': 1,
+                'details_txt': {
+                    'event': 'detection_result',
+                    'camera_id': camera_id,
+                    'class': class_name,
+                    'class_key': class_key,
+                    'confidence': round(float(conf), 4),
+                    'bbox_xyxy': [int(x1), int(y1), int(x2), int(y2)],
+                    'bbox_width': int(x2 - x1),
+                    'bbox_height': int(y2 - y1),
+                    'bbox_area': int(max(0, x2 - x1) * max(0, y2 - y1)),
+                    'track_id': detection.get('track_id'),
+                    'track_hits': int(detection.get('track_hits', 0) or 0),
+                    'track_age_sec': round(float(detection.get('track_age_sec', 0.0) or 0.0), 3),
+                    'lane': _lane_name_for_class(class_name),
+                    'weapon_model_hit': bool(detection.get('weapon_model_hit', False)),
+                    'weapon_tier': str(detection.get('weapon_tier', 'none')),
+                    'frame_size': f"{int(frame_w)}x{int(frame_h)}",
+                    'saved_snapshot': bool(detection_image_path),
+                },
             })
 
         if needs_event_log:
@@ -2198,7 +2341,22 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
                 'event_type': f'{class_name}_detected',
                 'severity': event_severity,
                 'description': f'{class_name.title()} detected with {conf:.2f} confidence',
-                'image_path': detection_image_path
+                'details': {
+                    'camera_id': camera_id,
+                    'class': class_name,
+                    'class_key': class_key,
+                    'confidence': round(float(conf), 4),
+                    'bbox_xyxy': [int(x1), int(y1), int(x2), int(y2)],
+                    'bbox_area': int(max(0, x2 - x1) * max(0, y2 - y1)),
+                    'track_id': detection.get('track_id'),
+                    'track_hits': int(detection.get('track_hits', 0) or 0),
+                    'track_age_sec': round(float(detection.get('track_age_sec', 0.0) or 0.0), 3),
+                    'lane': _lane_name_for_class(class_name),
+                    'weapon_model_hit': bool(detection.get('weapon_model_hit', False)),
+                    'weapon_tier': str(detection.get('weapon_tier', 'none')),
+                    'frame_size': f"{int(frame_w)}x{int(frame_h)}",
+                },
+                'image_path': detection_image_path,
             })
 
         if should_send_email and detection_image_path:
@@ -2209,20 +2367,157 @@ def detect_objects_and_classify(frame, camera_id=1, detections=None, apply_side_
 
     return frame
 
+
+def _format_scalar_text(value) -> str:
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, float):
+        rendered = f"{value:.6f}".rstrip('0').rstrip('.')
+        return rendered if rendered else '0'
+    if value is None:
+        return ''
+    return str(value)
+
+
+def _value_to_text_lines(value, indent: int = 0) -> list[str]:
+    pad = ' ' * max(0, int(indent))
+
+    if isinstance(value, dict):
+        lines = []
+        for key, item in value.items():
+            key_text = str(key)
+            if isinstance(item, (dict, list, tuple)):
+                lines.append(f"{pad}{key_text}:")
+                lines.extend(_value_to_text_lines(item, indent + 2))
+            else:
+                lines.append(f"{pad}{key_text}: {_format_scalar_text(item)}")
+        return lines
+
+    if isinstance(value, (list, tuple)):
+        lines = []
+        for idx, item in enumerate(value, start=1):
+            if isinstance(item, (dict, list, tuple)):
+                lines.append(f"{pad}{idx}:")
+                lines.extend(_value_to_text_lines(item, indent + 2))
+            else:
+                lines.append(f"{pad}{idx}: {_format_scalar_text(item)}")
+        return lines
+
+    return [f"{pad}{_format_scalar_text(value)}"]
+
+
+def _value_to_text(value) -> str:
+    return '\n'.join(_value_to_text_lines(value)).strip()
+
+
+def _coerce_description_to_text(raw_description) -> str:
+    if raw_description is None:
+        return ''
+
+    if isinstance(raw_description, (dict, list, tuple)):
+        return _value_to_text(raw_description)
+
+    text_value = str(raw_description)
+    stripped = text_value.strip()
+    if not stripped:
+        return ''
+
+    if (stripped.startswith('{') and stripped.endswith('}')) or (stripped.startswith('[') and stripped.endswith(']')):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, (dict, list, tuple)):
+                return _value_to_text(parsed)
+        except Exception:
+            pass
+
+    return text_value
+
+
+def _compose_event_description_text(description, details=None, stats=None) -> str:
+    sections = []
+
+    description_text = _coerce_description_to_text(description).strip()
+    if description_text:
+        sections.append(description_text)
+
+    if details is not None:
+        detail_text = _coerce_description_to_text(details).strip()
+        if detail_text:
+            sections.append(f"details:\n{detail_text}")
+
+    if stats is not None:
+        stats_text = _coerce_description_to_text(stats).strip()
+        if stats_text:
+            sections.append(f"stats:\n{stats_text}")
+
+    if not sections:
+        return ''
+
+    rendered = '\n'.join(sections).strip()
+    return rendered[:20000]
+
 # Helper function to save detection to database
 def save_detection_to_dataset_db(detection_data):
     """Save detection result to database"""
+    conn = None
     try:
         if DISABLE_DETECTION_DB:
             return
         conn = get_db_connection()
-        conn.execute('''
-            INSERT INTO detection_results 
-            (camera_id, object_class, confidence, bbox_x, bbox_y, bbox_width, bbox_height, image_path, dataset_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (detection_data['camera_id'], detection_data['object_class'], detection_data['confidence'], 
-              detection_data['bbox_x'], detection_data['bbox_y'], detection_data['bbox_width'], 
-              detection_data['bbox_height'], detection_data['image_path'], detection_data.get('dataset_id')))
+        details_txt = _coerce_description_to_text(
+            detection_data.get('details_txt')
+            or {
+                'event': 'detection_result',
+                'camera_id': detection_data.get('camera_id'),
+                'object_class': detection_data.get('object_class'),
+                'confidence': detection_data.get('confidence'),
+                'bbox_x': detection_data.get('bbox_x'),
+                'bbox_y': detection_data.get('bbox_y'),
+                'bbox_width': detection_data.get('bbox_width'),
+                'bbox_height': detection_data.get('bbox_height'),
+                'image_path': detection_data.get('image_path'),
+                'dataset_id': detection_data.get('dataset_id'),
+            }
+        )
+
+        try:
+            conn.execute('''
+                INSERT INTO detection_results 
+                (camera_id, object_class, confidence, bbox_x, bbox_y, bbox_width, bbox_height, image_path, dataset_id, details_txt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                detection_data['camera_id'],
+                detection_data['object_class'],
+                detection_data['confidence'],
+                detection_data['bbox_x'],
+                detection_data['bbox_y'],
+                detection_data['bbox_width'],
+                detection_data['bbox_height'],
+                detection_data['image_path'],
+                detection_data.get('dataset_id'),
+                details_txt,
+            ))
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # Backward-compatible fallback when details_txt column is missing in older schemas.
+            conn.execute('''
+                INSERT INTO detection_results 
+                (camera_id, object_class, confidence, bbox_x, bbox_y, bbox_width, bbox_height, image_path, dataset_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                detection_data['camera_id'],
+                detection_data['object_class'],
+                detection_data['confidence'],
+                detection_data['bbox_x'],
+                detection_data['bbox_y'],
+                detection_data['bbox_width'],
+                detection_data['bbox_height'],
+                detection_data['image_path'],
+                detection_data.get('dataset_id'),
+            ))
         
         conn.commit()
         
@@ -2234,27 +2529,57 @@ def save_detection_to_dataset_db(detection_data):
                 WHERE dataset_id = ?
             ''', (detection_data['dataset_id'],))
             conn.commit()
-        
-        conn.close()
+        return True
     except Exception as e:
         print(f"Error saving detection to dataset: {e}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 # Helper function to log surveillance events
 def log_surveillance_event_db(event_data):
     """Log surveillance event to database"""
+    conn = None
     try:
+        event_type = str(event_data.get('event_type', 'event')).strip() or 'event'
+        severity = str(event_data.get('severity', 'medium')).strip().lower() or 'medium'
+        description_txt = _compose_event_description_text(
+            event_data.get('description'),
+            details=event_data.get('details'),
+            stats=event_data.get('stats'),
+        )
+        if not description_txt:
+            description_txt = f"{event_type} event"
+
         conn = get_db_connection()
         conn.execute('''
             INSERT INTO surveillance_events 
             (camera_id, event_type, severity, description, image_path, video_path)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (event_data.get('camera_id'), event_data['event_type'], event_data.get('severity', 'medium'),
-              event_data.get('description'), event_data.get('image_path'), event_data.get('video_path')))
+        ''', (
+            event_data.get('camera_id'),
+            event_type,
+            severity,
+            description_txt,
+            event_data.get('image_path'),
+            event_data.get('video_path'),
+        ))
         
         conn.commit()
-        conn.close()
+        return True
     except Exception as e:
         print(f"Error logging surveillance event: {e}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 last_alert_time = 0
 # Function to send email alerts
@@ -2314,7 +2639,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
     is_upload_video = bool(upload_video_id)
 
-    # Night Shield fix: Respect original video FPS unless VIDEO_PLAYBACK_FPS override is provided.
+    # Night Shield fix: Respect original video FPS metadata unless an explicit playback override is provided.
     raw_native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     native_fps = raw_native_fps if 0.0 < raw_native_fps <= 120.0 else 25.0
     playback_fps = native_fps
@@ -2328,7 +2653,19 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
     source_duration_sec = (total_video_frames / native_fps) if native_fps > 0 and total_video_frames > 0 else 0.0
 
     detect_every = max(1, int(VIDEO_DETECT_EVERY)) if is_upload_video else 1
-    enhance_video_frames = bool(is_upload_video and VIDEO_ENHANCE)
+    lowlight_video_mode = bool(UPLOAD_LOWLIGHT_MODE_DEFAULT)
+    if is_upload_video and upload_video_id:
+        with upload_video_sessions_lock:
+            upload_session = upload_video_sessions.get(upload_video_id) or {}
+            lowlight_video_mode = bool(
+                upload_session.get(
+                    'lowlight_video_mode',
+                    upload_session.get('video_enhance', UPLOAD_LOWLIGHT_MODE_DEFAULT),
+                )
+            )
+
+    enhance_video_frames = bool(is_upload_video and (lowlight_video_mode or VIDEO_ENHANCE))
+    throttle_upload_playback = bool(is_upload_video and UPLOAD_VIDEO_REALTIME_PLAYBACK)
 
     if is_upload_video:
         _set_upload_video_session_metadata(
@@ -2342,6 +2679,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 'total_frames': total_video_frames,
                 'duration_sec': source_duration_sec,
                 'detect_every': detect_every,
+                'lowlight_video_mode': lowlight_video_mode,
                 'video_enhance': enhance_video_frames,
             },
         )
@@ -2380,7 +2718,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
     def capture_worker() -> None:
         global prev_frame
         local_frame_counter = 0
-        enhanced_keyframe_cache = None
+        enhancement_interval = max(1, int(detect_every if lowlight_video_mode else 30))
         while not stop_event.is_set() and cap.isOpened():
             try:
                 loop_start = time.time()
@@ -2398,15 +2736,21 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
                 local_frame_counter += 1
 
-                # Night Shield fix: Optional enhancement for uploaded video runs only on sparse keyframes.
-                if enhance_video_frames and (local_frame_counter % 30 == 0):
-                    try:
-                        enhanced_keyframe_cache = enhance_image(frame)
-                        frame = enhanced_keyframe_cache
-                    except Exception as exc:
-                        print(f"[UPLOAD] Keyframe enhancement failed: {exc}")
-
                 frame = cv2.resize(frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
+
+                # Night Shield fix: In low-light mode, enhance the stream-sized frame only on detection cycles.
+                if enhance_video_frames and (
+                    local_frame_counter == 1
+                    or (local_frame_counter % enhancement_interval == 0)
+                ):
+                    try:
+                        if UPLOAD_VIDEO_FAST_ENHANCE:
+                            frame = _enhance_upload_video_frame_fast(frame)
+                        else:
+                            frame = enhance_image(frame)
+                    except Exception as exc:
+                        print(f"[UPLOAD] Low-light frame enhancement failed: {exc}")
+
                 with frame_lock:
                     frame_state['frame'] = frame
                     if is_upload_video:
@@ -2422,8 +2766,8 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                 if prev_frame is None:
                     prev_frame = frame.copy()
 
-                # Night Shield fix: Throttle uploaded-file playback to match source (or VIDEO_PLAYBACK_FPS override).
-                if is_upload_video:
+                # Night Shield fix: Uploaded videos can process at full speed unless realtime playback is explicitly enabled.
+                if throttle_upload_playback:
                     elapsed = time.time() - loop_start
                     sleep_time = frame_delay - elapsed
                     if sleep_time > 0:
@@ -2550,6 +2894,17 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                             'event_type': 'anomaly_detected',
                             'severity': 'high',
                             'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
+                            'details': {
+                                'class': class_name,
+                                'confidence': round(float(conf), 4),
+                                'weapon_model_hit': bool(anomaly.get('weapon_model_hit', False)),
+                                'weapon_tier': str(anomaly.get('weapon_tier', 'none')),
+                                'bbox_xyxy': [int(v) for v in anomaly.get('bbox', (0, 0, 0, 0))],
+                                'bbox_area': int(anomaly.get('bbox_area', 0) or 0),
+                                'frame_seq': int(source_seq),
+                                'detect_source_seq': int(last_detect_seq),
+                                'detector': str(anomaly.get('detector', 'unknown')),
+                            },
                             'image_path': None,
                             'video_path': None,
                         })
@@ -2806,12 +3161,19 @@ def upload():
     video_id = (request.args.get('video_id') or '').strip()
     message = request.args.get('message', '')
     video_session = None
+    selected_lowlight_mode = bool(UPLOAD_LOWLIGHT_MODE_DEFAULT)
 
     if video_id:
         with upload_video_sessions_lock:
             existing = upload_video_sessions.get(video_id)
             if existing:
                 video_session = deepcopy(existing)
+                selected_lowlight_mode = bool(
+                    video_session.get(
+                        'lowlight_video_mode',
+                        video_session.get('video_enhance', selected_lowlight_mode),
+                    )
+                )
             else:
                 message = 'Video session not found. Please upload the file again.'
                 video_id = ''
@@ -2820,6 +3182,9 @@ def upload():
         'upload_video.html',
         video_id=video_id,
         video=video_session,
+        lowlight_video_mode=selected_lowlight_mode,
+        upload_summary_poll_seconds=UPLOAD_SUMMARY_POLL_SECONDS,
+        upload_stats_poll_seconds=UPLOAD_STATS_POLL_SECONDS,
         message=message,
     )
 
@@ -2837,6 +3202,16 @@ def upload_video():
 
         if not (video and allowed_file(video.filename)):
             return redirect(url_for('upload', message='Invalid file type. Please upload MP4, AVI, MOV, or MKV.'))
+
+        truthy_values = {'1', 'true', 'yes', 'on'}
+        lowlight_mode_values = request.form.getlist('lowlight_video_mode')
+        if lowlight_mode_values:
+            lowlight_video_mode = any(
+                str(value).strip().lower() in truthy_values
+                for value in lowlight_mode_values
+            )
+        else:
+            lowlight_video_mode = bool(UPLOAD_LOWLIGHT_MODE_DEFAULT)
 
         os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
         safe_name = secure_filename(video.filename) or f'uploaded_{int(time.time())}.mp4'
@@ -2856,7 +3231,9 @@ def upload_video():
             original_name=safe_name,
             stored_name=stored_name,
             absolute_path=file_path,
+            lowlight_video_mode=lowlight_video_mode,
         )
+        _start_upload_video_pipeline_warmup()
         # Night Shield fix: Keep last uploaded video id in session for /video_info and /video_stats fallback.
         session['last_upload_video_id'] = video_id
         return redirect(url_for('upload', video_id=video_id))
@@ -2919,11 +3296,20 @@ def video_info():
     ).strip()
 
     video_path = ''
+    lowlight_video_mode = bool(UPLOAD_LOWLIGHT_MODE_DEFAULT)
+    video_enhance_enabled = bool(VIDEO_ENHANCE)
     if video_id:
         with upload_video_sessions_lock:
             session_data = upload_video_sessions.get(video_id)
             if session_data:
                 video_path = str(session_data.get('absolute_video_path', '') or '').strip()
+                lowlight_video_mode = bool(
+                    session_data.get(
+                        'lowlight_video_mode',
+                        session_data.get('video_enhance', lowlight_video_mode),
+                    )
+                )
+                video_enhance_enabled = bool(session_data.get('video_enhance', video_enhance_enabled))
 
     if not video_path:
         video_path = str(payload.get('filepath') or request.form.get('filepath') or request.args.get('filepath') or '').strip()
@@ -2946,6 +3332,8 @@ def video_info():
                 'frame_height': int(info.get('height', 0)),
                 'total_frames': int(info.get('frame_count', 0)),
                 'duration_sec': float(info.get('duration_sec', 0)),
+                'lowlight_video_mode': lowlight_video_mode,
+                'video_enhance': video_enhance_enabled,
             },
         )
 
@@ -2957,6 +3345,8 @@ def video_info():
         'height': int(info.get('height', 0)),
         'frame_count': int(info.get('frame_count', 0)),
         'duration_sec': int(info.get('duration_sec', 0)),
+        'lowlight_video_mode': bool(lowlight_video_mode),
+        'video_enhance': bool(video_enhance_enabled),
     })
 
 
@@ -2994,6 +3384,10 @@ def video_stats():
         'eta_sec': round(float(session_data.get('eta_sec', 0.0) or 0.0), 2),
         'total_detections': int(session_data.get('total_detections', 0)),
         'weapon_detections': int(session_data.get('weapon_detections_total', 0)),
+        'video_enhance': bool(session_data.get('video_enhance', False)),
+        'lowlight_video_mode': bool(
+            session_data.get('lowlight_video_mode', session_data.get('video_enhance', False))
+        ),
     })
 
 
@@ -3042,14 +3436,15 @@ def upload_video_summary():
         return jsonify({'error': 'Video session not found'}), 404
 
     frames_processed = int(session_data.get('frames_processed', 0))
+    detection_frames_processed = int(session_data.get('detection_frames_processed', 0))
     total_detections = int(session_data.get('total_detections', 0))
     total_anomalies = int(session_data.get('total_anomalies', 0))
     started_at = float(session_data.get('started_at') or session_data.get('created_at') or time.time())
     ended_at = float(session_data.get('completed_at') or time.time())
     duration_sec = max(0.0, ended_at - started_at)
 
-    avg_detections = (total_detections / frames_processed) if frames_processed else 0.0
-    avg_inference_ms = (float(session_data.get('sum_inference_ms', 0.0)) / frames_processed) if frames_processed else 0.0
+    avg_detections = (total_detections / detection_frames_processed) if detection_frames_processed else 0.0
+    avg_inference_ms = (float(session_data.get('sum_inference_ms', 0.0)) / detection_frames_processed) if detection_frames_processed else 0.0
     avg_fps = (float(session_data.get('sum_fps', 0.0)) / frames_processed) if frames_processed else 0.0
 
     payload = {
@@ -3060,6 +3455,7 @@ def upload_video_summary():
         'error': str(session_data.get('error', '')),
         'summary': {
             'frames_processed': frames_processed,
+            'detection_frames_processed': detection_frames_processed,
             'current_frame': int(session_data.get('current_frame', frames_processed) or frames_processed),
             'total_frames': int(session_data.get('total_frames', 0) or 0),
             'progress_percent': round(float(session_data.get('progress_percent', 0.0) or 0.0), 2),
@@ -3075,6 +3471,10 @@ def upload_video_summary():
             'elapsed_sec': round(float(session_data.get('elapsed_sec', 0.0) or 0.0), 2),
             'eta_sec': round(float(session_data.get('eta_sec', 0.0) or 0.0), 2),
             'max_confidence': round(float(session_data.get('max_confidence', 0.0)), 4),
+            'video_enhance': bool(session_data.get('video_enhance', False)),
+            'lowlight_video_mode': bool(
+                session_data.get('lowlight_video_mode', session_data.get('video_enhance', False))
+            ),
         },
         'context': _build_upload_video_context(session_data),
         'graph': session_data.get('graph', {}),
@@ -3192,6 +3592,7 @@ def init_db():
             bbox_height REAL,
             image_path TEXT,
             dataset_id INTEGER,
+            details_txt TEXT,
             FOREIGN KEY (camera_id) REFERENCES cam (id),
             FOREIGN KEY (dataset_id) REFERENCES datasets (dataset_id)
         )
@@ -3227,6 +3628,12 @@ def init_db():
             FOREIGN KEY (camera_id) REFERENCES cam (id)
         )
     ''')
+
+    # Night Shield fix: Add details_txt to legacy detection_results tables that predate this column.
+    try:
+        conn.execute('ALTER TABLE detection_results ADD COLUMN details_txt TEXT')
+    except Exception:
+        pass
     
     conn.commit()
     conn.close()
@@ -3967,92 +4374,432 @@ def dataset_details(dataset_id):
 @app.route('/save_detection_to_dataset', methods=['POST'])
 def save_detection_to_dataset():
     """Save detection result to dataset"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     if DISABLE_DETECTION_DB:
         return jsonify({'status': 'skipped', 'message': 'Detection persistence disabled by server config'}), 200
-    
-    conn = get_db_connection()
+
     try:
-        conn.execute('''
-            INSERT INTO detection_results 
-            (camera_id, object_class, confidence, bbox_x, bbox_y, bbox_width, bbox_height, image_path, dataset_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (data['camera_id'], data['object_class'], data['confidence'], 
-              data['bbox_x'], data['bbox_y'], data['bbox_width'], data['bbox_height'],
-              data['image_path'], data.get('dataset_id')))
-        
-        conn.commit()
-        
-        # Update sample count
-        conn.execute('''
-            UPDATE datasets 
-            SET total_samples = (SELECT COUNT(*) FROM detection_results WHERE dataset_id = datasets.dataset_id)
-            WHERE dataset_id = ?
-        ''', (data.get('dataset_id'),))
-        conn.commit()
+        required_fields = ('camera_id', 'object_class', 'confidence', 'bbox_x', 'bbox_y', 'bbox_width', 'bbox_height')
+        missing = [field for field in required_fields if field not in data]
+        if missing:
+            return jsonify({'status': 'error', 'message': f"Missing required fields: {', '.join(missing)}"}), 400
+
+        detection_payload = {
+            'camera_id': data['camera_id'],
+            'object_class': data['object_class'],
+            'confidence': data['confidence'],
+            'bbox_x': data['bbox_x'],
+            'bbox_y': data['bbox_y'],
+            'bbox_width': data['bbox_width'],
+            'bbox_height': data['bbox_height'],
+            'image_path': data.get('image_path'),
+            'dataset_id': data.get('dataset_id'),
+            'details_txt': data.get('details_txt') or {
+                'event': 'detection_result',
+                'camera_id': data.get('camera_id'),
+                'object_class': data.get('object_class'),
+                'confidence': data.get('confidence'),
+                'bbox_x': data.get('bbox_x'),
+                'bbox_y': data.get('bbox_y'),
+                'bbox_width': data.get('bbox_width'),
+                'bbox_height': data.get('bbox_height'),
+                'image_path': data.get('image_path'),
+                'dataset_id': data.get('dataset_id'),
+            },
+        }
+
+        persisted = save_detection_to_dataset_db(detection_payload)
+        if not persisted:
+            return jsonify({'status': 'error', 'message': 'Failed to save detection result'}), 500
         
         return jsonify({'status': 'success', 'message': 'Detection saved to dataset'})
         
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
-    finally:
-        conn.close()
 
 @app.route('/log_surveillance_event', methods=['POST'])
 def log_surveillance_event():
     """Log surveillance event"""
-    data = request.get_json()
-    
-    conn = get_db_connection()
+    data = request.get_json(silent=True) or {}
+
+    event_type = str(data.get('event_type', '')).strip()
+    if not event_type:
+        return jsonify({'status': 'error', 'message': 'event_type is required'}), 400
+
     try:
-        conn.execute('''
-            INSERT INTO surveillance_events 
-            (camera_id, event_type, severity, description, image_path, video_path)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (data.get('camera_id'), data['event_type'], data.get('severity', 'medium'),
-              data.get('description'), data.get('image_path'), data.get('video_path')))
-        
-        conn.commit()
+        persisted = log_surveillance_event_db({
+            'camera_id': data.get('camera_id'),
+            'event_type': event_type,
+            'severity': data.get('severity', 'medium'),
+            'description': data.get('description'),
+            'details': data.get('details'),
+            'stats': data.get('stats'),
+            'image_path': data.get('image_path'),
+            'video_path': data.get('video_path'),
+        })
+        if not persisted:
+            return jsonify({'status': 'error', 'message': 'Failed to log event'}), 500
         return jsonify({'status': 'success', 'message': 'Event logged successfully'})
-        
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
+
+
+def _row_to_plain_dict(row) -> dict:
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return dict(row)
+
+    try:
+        keys = list(row.keys())
+        return {key: row[key] for key in keys}
+    except Exception:
+        pass
+
+    try:
+        return dict(row)
+    except Exception:
+        return {}
+
+
+def _safe_int_value(value) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _load_surveillance_events_view(limit: int = 200, event_types: list[str] | None = None) -> tuple[list[dict], dict]:
+    resolved_limit = max(1, min(2000, int(limit or 200)))
+    filter_types = [str(item).strip() for item in (event_types or []) if str(item).strip()]
+
+    where_clause = ''
+    where_params: list = []
+    if filter_types:
+        placeholders = ', '.join(['?'] * len(filter_types))
+        where_clause = f"WHERE se.event_type IN ({placeholders})"
+        where_params = list(filter_types)
+
+    conn = get_db_connection()
+    try:
+        events_rows = conn.execute(
+            f'''
+            SELECT se.*, c.camname
+            FROM surveillance_events se
+            LEFT JOIN cam c ON se.camera_id = c.id
+            {where_clause}
+            ORDER BY se.timestamp DESC
+            LIMIT ?
+            ''',
+            tuple(where_params + [resolved_limit]),
+        ).fetchall()
+
+        stats_row = conn.execute(
+            f'''
+            SELECT
+                COUNT(*) AS total_events,
+                SUM(CASE WHEN LOWER(COALESCE(se.severity, 'medium')) = 'high' THEN 1 ELSE 0 END) AS high_events,
+                SUM(CASE WHEN LOWER(COALESCE(se.severity, 'medium')) = 'medium' THEN 1 ELSE 0 END) AS medium_events,
+                SUM(CASE WHEN LOWER(COALESCE(se.severity, 'medium')) = 'low' THEN 1 ELSE 0 END) AS low_events,
+                SUM(CASE WHEN LOWER(COALESCE(se.event_type, '')) LIKE '%%_detected' OR LOWER(COALESCE(se.event_type, '')) = 'anomaly_detected' THEN 1 ELSE 0 END) AS detection_events,
+                SUM(CASE WHEN LOWER(COALESCE(se.event_type, '')) = 'upload_video_summary' THEN 1 ELSE 0 END) AS session_summaries,
+                SUM(CASE WHEN LOWER(COALESCE(se.event_type, '')) IN ('login_success', 'login_failed') THEN 1 ELSE 0 END) AS auth_events
+            FROM surveillance_events se
+            {where_clause}
+            ''',
+            tuple(where_params),
+        ).fetchone()
+
+        type_rows = conn.execute(
+            f'''
+            SELECT se.event_type, COUNT(*) AS total
+            FROM surveillance_events se
+            {where_clause}
+            GROUP BY se.event_type
+            ORDER BY total DESC
+            LIMIT 12
+            ''',
+            tuple(where_params),
+        ).fetchall()
     finally:
         conn.close()
+
+    events = []
+    for raw in events_rows:
+        event = _row_to_plain_dict(raw)
+        event['event_type'] = str(event.get('event_type', 'event')).strip() or 'event'
+        event['severity'] = str(event.get('severity', 'medium')).strip().lower() or 'medium'
+        event['camname'] = str(event.get('camname') or '').strip()
+        event['timestamp_text'] = str(event.get('timestamp') or '')
+        event['description_text'] = _coerce_description_to_text(event.get('description')).strip()
+        if not event['description_text']:
+            event['description_text'] = f"{event['event_type']} event"
+        events.append(event)
+
+    stats_source = _row_to_plain_dict(stats_row)
+    stats = {
+        'total_events': _safe_int_value(stats_source.get('total_events')),
+        'high_events': _safe_int_value(stats_source.get('high_events')),
+        'medium_events': _safe_int_value(stats_source.get('medium_events')),
+        'low_events': _safe_int_value(stats_source.get('low_events')),
+        'detection_events': _safe_int_value(stats_source.get('detection_events')),
+        'session_summaries': _safe_int_value(stats_source.get('session_summaries')),
+        'auth_events': _safe_int_value(stats_source.get('auth_events')),
+        'limit': resolved_limit,
+        'type_breakdown': [],
+    }
+
+    for item in type_rows:
+        row = _row_to_plain_dict(item)
+        stats['type_breakdown'].append({
+            'event_type': str(row.get('event_type', 'event')),
+            'total': _safe_int_value(row.get('total')),
+        })
+
+    return events, stats
+
+
+def _build_surveillance_report_lines(report_title: str, events: list[dict], stats: dict) -> list[str]:
+    generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines = [
+        report_title,
+        f"generated_at: {generated_at}",
+        '',
+        'summary:',
+        f"total_events: {int(stats.get('total_events', 0) or 0)}",
+        f"high_events: {int(stats.get('high_events', 0) or 0)}",
+        f"medium_events: {int(stats.get('medium_events', 0) or 0)}",
+        f"low_events: {int(stats.get('low_events', 0) or 0)}",
+        f"detection_events: {int(stats.get('detection_events', 0) or 0)}",
+        f"session_summaries: {int(stats.get('session_summaries', 0) or 0)}",
+        f"auth_events: {int(stats.get('auth_events', 0) or 0)}",
+    ]
+
+    type_breakdown = stats.get('type_breakdown', []) or []
+    if type_breakdown:
+        lines.append('top_event_types:')
+        for item in type_breakdown:
+            lines.append(f"  {item.get('event_type', 'event')}: {int(item.get('total', 0) or 0)}")
+
+    lines.extend(['', 'events:'])
+
+    if not events:
+        lines.append('  no events found')
+        return lines
+
+    for idx, event in enumerate(events, start=1):
+        lines.append(f"{idx}. timestamp: {event.get('timestamp_text', '')}")
+        lines.append(f"   event_type: {event.get('event_type', 'event')}")
+        lines.append(f"   severity: {event.get('severity', 'medium')}")
+        lines.append(f"   camera: {event.get('camname') or 'N/A'}")
+        image_path = str(event.get('image_path') or '').strip()
+        video_path = str(event.get('video_path') or '').strip()
+        if image_path:
+            lines.append(f"   image_path: {image_path}")
+        if video_path:
+            lines.append(f"   video_path: {video_path}")
+        lines.append('   description:')
+
+        description_lines = (event.get('description_text') or '').splitlines()
+        if not description_lines:
+            lines.append('      n/a')
+        else:
+            for detail in description_lines:
+                lines.append(f"      {detail}")
+        lines.append('')
+
+    return lines
+
+
+def _escape_pdf_text(value: str) -> str:
+    text_value = str(value or '')
+    text_value = text_value.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    text_value = text_value.replace('\r', ' ').replace('\t', '    ')
+    return text_value
+
+
+def _build_plain_text_pdf(report_title: str, report_lines: list[str]) -> bytes:
+    page_width = 595
+    page_height = 842
+    margin_x = 40
+    top_y = 805
+    line_step = 13
+    usable_lines_per_page = 52
+
+    normalized_lines: list[str] = []
+    for raw_line in report_lines:
+        line_text = str(raw_line or '')
+        wrapped = textwrap.wrap(
+            line_text,
+            width=96,
+            break_long_words=True,
+            replace_whitespace=False,
+            drop_whitespace=False,
+        )
+        if not wrapped:
+            normalized_lines.append('')
+        else:
+            normalized_lines.extend(wrapped)
+
+    if not normalized_lines:
+        normalized_lines = ['No report data available.']
+
+    pages: list[list[str]] = []
+    current_page: list[str] = []
+    for line in normalized_lines:
+        current_page.append(line)
+        if len(current_page) >= usable_lines_per_page:
+            pages.append(current_page)
+            current_page = []
+    if current_page:
+        pages.append(current_page)
+
+    page_count = max(1, len(pages))
+
+    catalog_id = 1
+    pages_id = 2
+    font_id = 3
+    first_page_id = 4
+
+    page_object_ids = [first_page_id + (idx * 2) for idx in range(page_count)]
+    content_object_ids = [object_id + 1 for object_id in page_object_ids]
+    total_objects = 3 + (page_count * 2)
+
+    objects: dict[int, bytes] = {}
+    objects[catalog_id] = f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode('latin-1')
+    kids_list = ' '.join([f"{page_id} 0 R" for page_id in page_object_ids])
+    objects[pages_id] = f"<< /Type /Pages /Kids [{kids_list}] /Count {page_count} >>".encode('latin-1')
+    objects[font_id] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+    generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    for idx in range(page_count):
+        page_id = page_object_ids[idx]
+        content_id = content_object_ids[idx]
+        lines = pages[idx] if idx < len(pages) else []
+
+        stream_commands = [
+            'BT',
+            '/F1 10 Tf',
+            f"{margin_x} {top_y} Td",
+            f"({_escape_pdf_text(f'{report_title}  page {idx + 1}/{page_count}')}) Tj",
+            f"0 -{line_step} Td ({_escape_pdf_text(f'generated_at: {generated_at}')}) Tj",
+            f"0 -{line_step + 2} Td",
+        ]
+
+        for line in lines:
+            stream_commands.append(f"({_escape_pdf_text(line)}) Tj")
+            stream_commands.append(f"0 -{line_step} Td")
+
+        stream_commands.append('ET')
+        stream_data = '\n'.join(stream_commands).encode('latin-1', errors='replace')
+
+        content_header = f"<< /Length {len(stream_data)} >>\nstream\n".encode('latin-1')
+        objects[content_id] = content_header + stream_data + b"\nendstream"
+
+        objects[page_id] = (
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
+        ).encode('latin-1')
+
+    pdf_bytes = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0] * (total_objects + 1)
+
+    for object_id in range(1, total_objects + 1):
+        offsets[object_id] = len(pdf_bytes)
+        pdf_bytes.extend(f"{object_id} 0 obj\n".encode('latin-1'))
+        pdf_bytes.extend(objects[object_id])
+        pdf_bytes.extend(b"\nendobj\n")
+
+    xref_start = len(pdf_bytes)
+    pdf_bytes.extend(f"xref\n0 {total_objects + 1}\n".encode('latin-1'))
+    pdf_bytes.extend(b"0000000000 65535 f \n")
+
+    for object_id in range(1, total_objects + 1):
+        pdf_bytes.extend(f"{offsets[object_id]:010d} 00000 n \n".encode('latin-1'))
+
+    pdf_bytes.extend(
+        f"trailer\n<< /Size {total_objects + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode('latin-1')
+    )
+    return bytes(pdf_bytes)
 
 @app.route('/surveillance_events')
 def surveillance_events():
     """Display surveillance events"""
     if 'loggedin' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    events = conn.execute('''
-        SELECT se.*, c.camname 
-        FROM surveillance_events se
-        LEFT JOIN cam c ON se.camera_id = c.id
-        ORDER BY se.timestamp DESC
-        LIMIT 100
-    ''').fetchall()
-    conn.close()
-    
-    return render_template('surveillance_events.html', events=events)
+
+    try:
+        limit = int(float(request.args.get('limit', '200')))
+    except Exception:
+        limit = 200
+
+    events, stats = _load_surveillance_events_view(limit=limit)
+    return render_template(
+        'surveillance_events.html',
+        events=events,
+        stats=stats,
+        page_title='Surveillance Events',
+        page_subtitle='Detailed event, session, and detection logs in plain-text format.',
+        download_pdf_url=url_for('download_surveillance_events_pdf', scope='all', limit=limit),
+        active_scope='all',
+    )
 
 @app.route('/auth_logs')
 def auth_logs():
     """Display authentication logs (login successes and failures)."""
     if 'loggedin' not in session:
         return redirect(url_for('index'))
-    conn = get_db_connection()
-    rows = conn.execute('''
-        SELECT * FROM surveillance_events 
-        WHERE event_type IN ('login_success','login_failed')
-        ORDER BY timestamp DESC
-        LIMIT 200
-    ''').fetchall()
-    conn.close()
-    # Reuse surveillance_events template for simplicity
-    return render_template('surveillance_events.html', events=rows)
+
+    try:
+        limit = int(float(request.args.get('limit', '200')))
+    except Exception:
+        limit = 200
+
+    auth_event_types = ['login_success', 'login_failed']
+    events, stats = _load_surveillance_events_view(limit=limit, event_types=auth_event_types)
+    return render_template(
+        'surveillance_events.html',
+        events=events,
+        stats=stats,
+        page_title='Authentication Logs',
+        page_subtitle='Login success and failure history with detailed text metadata.',
+        download_pdf_url=url_for('download_surveillance_events_pdf', scope='auth', limit=limit),
+        active_scope='auth',
+    )
+
+
+@app.route('/surveillance_events/download/pdf')
+def download_surveillance_events_pdf():
+    """Download surveillance events report as PDF."""
+    if 'loggedin' not in session:
+        return redirect(url_for('index'))
+
+    scope = str(request.args.get('scope') or 'all').strip().lower()
+    try:
+        limit = int(float(request.args.get('limit', '500')))
+    except Exception:
+        limit = 500
+
+    if scope == 'auth':
+        selected_types = ['login_success', 'login_failed']
+        report_title = 'Night Shield Authentication Log Report'
+    else:
+        selected_types = None
+        report_title = 'Night Shield Surveillance Events Report'
+
+    events, stats = _load_surveillance_events_view(limit=max(1, min(2000, limit)), event_types=selected_types)
+    report_lines = _build_surveillance_report_lines(report_title=report_title, events=events, stats=stats)
+    pdf_bytes = _build_plain_text_pdf(report_title=report_title, report_lines=report_lines)
+
+    timestamp_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
+    scope_suffix = 'auth' if scope == 'auth' else 'events'
+    filename = f"night_shield_{scope_suffix}_{timestamp_suffix}.pdf"
+
+    return Response(
+        pdf_bytes,
+        mimetype='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
 
 @app.route('/dataset_analytics')
 def dataset_analytics():
