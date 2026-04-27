@@ -10,53 +10,9 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/addcamera-style.css')}}">
 </head>
 <body>
-   <div class="container">
-      <aside>
-           
-         <div class="top">
-           <div class="logo">
-             <h2>NIGHT <span class="danger">SHIELD</span> </h2>
-           </div>
-           <div class="close" id="close_btn">
-            <span class="material-symbols-sharp">close</span>
-           </div>
-         </div>
-         <!-- end top -->
-          <div class="sidebar">
-
-            <a href="/dashboard">
-              <span class="material-symbols-sharp">grid_view </span>
-              <h3>Dashboard</h3>
-           </a>
-           <a href="/addCamera">
-            <span class="material-symbols-sharp">videocam </span>
-            <h3>Video Cam</h3>
-         </a>
-         <a href="/upload">
-          <span class="material-symbols-sharp">upload </span>
-          <h3>Upload Video</h3>
-          </a>
-           <a href="/contact">
-            <span class="material-symbols-sharp">help </span>
-            <h3>Help</h3>
-         </a>
-           <a href="/logout">
-              <span class="material-symbols-sharp">logout </span>
-              <h3>Logout</h3>
-           </a>
-             
-
-
-          </div>
-
-      </aside>
-      <!-- --------------
-        end asid
-      -------------------- -->
-
-      <!-- --------------
-        start main part
-      --------------- -->
+   <div class="container top-nav-layout">
+      {% include 'partials/top_nav.html' %}
+      <div class="content-grid with-right">
 
       <main>
            <h1>Add Camera</h1>
@@ -127,28 +83,6 @@
       ---------------------->
     <div class="right">
 
-<div class="top">
-   <button id="menu_bar">
-     <span class="material-symbols-sharp">menu</span>
-   </button>
-
-   <div class="theme-toggler">
-     <span class="material-symbols-sharp active">light_mode</span>
-     <span class="material-symbols-sharp">dark_mode</span>
-   </div>
-    <div class="profile">
-       <div class="info">
-           <p><b>Profile</b></p>
-           <p>Admin</p>
-           <small class="text-muted"></small>
-       </div>
-       <div class="profile-photo">
-         <img src="{{ url_for('static', filename='images/Profile-pic.jpeg')}}" alt=""/>
-       </div>
-    </div>
-</div>
-
-
         <div class="insights">
 
            <!-- start seling -->
@@ -180,12 +114,13 @@
 
     
      
+    </div>
+
+  </div>
+
+
      </div>
-
-</div>
-
-
-   </div>
+     </div>
 
      <!-- Footer -->
    <footer>

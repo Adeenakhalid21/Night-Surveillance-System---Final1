@@ -264,53 +264,9 @@
   </style>
 </head>
 <body>
-  <div class="container">
-    <aside>
-      <div class="top">
-        <div class="logo">
-          <h2>NIGHT <span class="danger">SHIELD</span></h2>
-        </div>
-        <div class="close" id="close_btn">
-          <span class="material-symbols-sharp">close</span>
-        </div>
-      </div>
-
-      <div class="sidebar">
-        <a href="{{ url_for('dashboard') }}">
-          <span class="material-symbols-sharp">grid_view</span>
-          <h3>Dashboard</h3>
-        </a>
-        <a href="{{ url_for('addCamera') }}">
-          <span class="material-symbols-sharp">videocam</span>
-          <h3>Video Cam</h3>
-        </a>
-        <a href="{{ url_for('upload') }}">
-          <span class="material-symbols-sharp">upload</span>
-          <h3>Upload Video</h3>
-        </a>
-        <a href="{{ url_for('surveillance_events') }}" class="active">
-          <span class="material-symbols-sharp">security</span>
-          <h3>Events</h3>
-        </a>
-        <a href="{{ url_for('dataset_analytics') }}">
-          <span class="material-symbols-sharp">analytics</span>
-          <h3>Analytics</h3>
-        </a>
-        <a href="{{ url_for('datasets') }}">
-          <span class="material-symbols-sharp">dataset</span>
-          <h3>Datasets</h3>
-        </a>
-        <a href="{{ url_for('contact') }}">
-          <span class="material-symbols-sharp">help</span>
-          <h3>Help</h3>
-        </a>
-        <a href="{{ url_for('logout') }}">
-          <span class="material-symbols-sharp">logout</span>
-          <h3>Logout</h3>
-        </a>
-      </div>
-    </aside>
-
+  <div class="container top-nav-layout">
+    {% include 'partials/top_nav.html' %}
+    <div class="content-grid with-right">
     <main>
       <h1>{{ page_title or 'Surveillance Events' }}</h1>
       <p style="opacity: 0.82; color: var(--surface-muted-text); margin-top: 0.2rem;">{{ page_subtitle or 'Central event log for detections, sessions, and system activity.' }}</p>
@@ -391,26 +347,6 @@
     </main>
 
     <div class="right">
-      <div class="top">
-        <button id="menu_bar">
-          <span class="material-symbols-sharp">menu</span>
-        </button>
-        <div class="theme-toggler">
-          <span class="material-symbols-sharp active">light_mode</span>
-          <span class="material-symbols-sharp">dark_mode</span>
-        </div>
-        <div class="profile">
-          <div class="info">
-            <p><b>{{ session.get('firstname', 'User') }}</b></p>
-            <p>Admin</p>
-            <small class="text-muted"></small>
-          </div>
-          <div class="profile-photo">
-            <img src="{{ url_for('static', filename='images/profile-1.jpg') }}" alt="Profile Picture">
-          </div>
-        </div>
-      </div>
-
       <section class="type-card">
         <h3>Top Event Types</h3>
         <ul class="type-list">
@@ -424,6 +360,7 @@
         </ul>
       </section>
     </div>
+  </div>
   </div>
 
   <script src="{{ url_for('static', filename='js/dashboard-script.js') }}"></script>

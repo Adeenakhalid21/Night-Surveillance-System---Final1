@@ -1,0 +1,69 @@
+<header class="top-nav" aria-label="Primary">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-text">Night Shield</span>
+  </div>
+
+  <button class="nav-toggle" id="navToggle" type="button" aria-label="Toggle navigation">
+    <span class="material-symbols-sharp">menu</span>
+  </button>
+
+  <nav class="pill-nav" aria-label="Module navigation">
+    <a href="/dashboard" data-route="/dashboard" data-aliases="/cam,/video_feed" title="Surveillance Camera">
+      <span class="material-symbols-sharp">grid_view</span>
+      <span class="nav-label">Surveillance</span>
+    </a>
+    <a href="/addCamera" data-route="/addCamera" data-aliases="/preview" title="Video Cam">
+      <span class="material-symbols-sharp">videocam</span>
+      <span class="nav-label">Video Cam</span>
+    </a>
+    <a href="/upload" data-route="/upload" data-aliases="/upload_video,/upload_video_feed,/upload_video_summary" title="Upload Video">
+      <span class="material-symbols-sharp">upload</span>
+      <span class="nav-label">Upload</span>
+    </a>
+    <a href="/lowlight_detection" data-route="/lowlight_detection" title="Low-Light Detection">
+      <span class="material-symbols-sharp">nightlight</span>
+      <span class="nav-label">Low-Light</span>
+    </a>
+    <a href="/image_enhancement" data-route="/image_enhancement" title="Image Enhancement">
+      <span class="material-symbols-sharp">auto_fix_high</span>
+      <span class="nav-label">Enhancement</span>
+    </a>
+    <a href="/datasets" data-route="/datasets" data-aliases="/dataset_details,/add_dataset" title="Datasets">
+      <span class="material-symbols-sharp">dataset</span>
+      <span class="nav-label">Datasets</span>
+    </a>
+    <a href="/dataset_analytics" data-route="/dataset_analytics" title="Analytics">
+      <span class="material-symbols-sharp">analytics</span>
+      <span class="nav-label">Analytics</span>
+    </a>
+    <a href="/surveillance_events" data-route="/surveillance_events" data-aliases="/auth_logs" title="Events">
+      <span class="material-symbols-sharp">security</span>
+      <span class="nav-label">Events</span>
+    </a>
+    <a href="/contact" data-route="/contact" title="Help">
+      <span class="material-symbols-sharp">help</span>
+      <span class="nav-label">Help</span>
+    </a>
+    <a href="/logout" data-route="/logout" class="nav-logout" title="Logout">
+      <span class="material-symbols-sharp">logout</span>
+      <span class="nav-label">Logout</span>
+    </a>
+  </nav>
+
+  <div class="nav-actions">
+    <div class="theme-toggler" role="button" aria-label="Toggle theme">
+      <span class="material-symbols-sharp active">light_mode</span>
+      <span class="material-symbols-sharp">dark_mode</span>
+    </div>
+    <div class="profile">
+      <div class="info">
+        <p><b>{{ display_name or session.get('firstname', 'User') }}</b></p>
+        <p>{{ profile_role or 'Admin' }}</p>
+      </div>
+      <div class="profile-photo">
+        <img src="{{ url_for('static', filename='images/Profile-pic.jpeg')}}" alt="Profile">
+      </div>
+    </div>
+  </div>
+</header>

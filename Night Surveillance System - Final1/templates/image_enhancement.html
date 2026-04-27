@@ -10,61 +10,9 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/image-enhancement-style.css')}}">
 </head>
 <body>
-  <div class="container enhancement-page">
-    <aside>
-      <div class="top">
-        <div class="logo">
-          <h2>NIGHT <span class="danger">WATCH</span></h2>
-        </div>
-        <div class="close" id="close_btn">
-          <span class="material-symbols-sharp">close</span>
-        </div>
-      </div>
-
-      <div class="sidebar">
-        <a href="/dashboard">
-          <span class="material-symbols-sharp">grid_view</span>
-          <h3>Dashboard</h3>
-        </a>
-        <a href="/addCamera">
-          <span class="material-symbols-sharp">videocam</span>
-          <h3>Video Cam</h3>
-        </a>
-        <a href="/upload">
-          <span class="material-symbols-sharp">upload</span>
-          <h3>Upload Video</h3>
-        </a>
-        <a href="/lowlight_detection">
-          <span class="material-symbols-sharp">nightlight</span>
-          <h3>Low-Light Detection</h3>
-        </a>
-        <a href="/image_enhancement" class="active">
-          <span class="material-symbols-sharp">auto_fix_high</span>
-          <h3>Image Enhancement</h3>
-        </a>
-        <a href="/datasets">
-          <span class="material-symbols-sharp">dataset</span>
-          <h3>Datasets</h3>
-        </a>
-        <a href="/surveillance_events">
-          <span class="material-symbols-sharp">security</span>
-          <h3>Events</h3>
-        </a>
-        <a href="/dataset_analytics">
-          <span class="material-symbols-sharp">analytics</span>
-          <h3>Analytics</h3>
-        </a>
-        <a href="/contact">
-          <span class="material-symbols-sharp">help</span>
-          <h3>Help</h3>
-        </a>
-        <a href="/logout">
-          <span class="material-symbols-sharp">logout</span>
-          <h3>Logout</h3>
-        </a>
-      </div>
-    </aside>
-
+  <div class="container enhancement-page top-nav-layout">
+    {% include 'partials/top_nav.html' %}
+    <div class="content-grid">
     <main class="enhancement-main">
       <section class="page-intro card-panel">
         <h1>
@@ -252,29 +200,7 @@
       </section>
     </main>
 
-    <div class="right">
-      <div class="top">
-        <button id="menu_bar">
-          <span class="material-symbols-sharp">menu</span>
-        </button>
-
-        <div class="theme-toggler">
-          <span class="material-symbols-sharp active">light_mode</span>
-          <span class="material-symbols-sharp">dark_mode</span>
-        </div>
-
-        <div class="profile">
-          <div class="info">
-            <p><b>{{ session.get('firstname', 'User') }}</b></p>
-            <p>Admin</p>
-            <small class="text-muted"></small>
-          </div>
-          <div class="profile-photo">
-            <img src="{{ url_for('static', filename='images/Profile-pic.jpeg')}}" alt="Profile"/>
-          </div>
-        </div>
-      </div>
-    </div>
+  </div>
   </div>
 
   <script src="{{ url_for('static', filename='js/dashboard-script.js') }}"></script>

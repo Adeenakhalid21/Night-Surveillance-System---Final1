@@ -1,18 +1,71 @@
-const sideMenu = document.querySelector('aside');
-const menuBtn = document.querySelector('#menu_bar');
-const closeBtn = document.querySelector('#close_btn');
+const topNav = document.querySelector('.top-nav');
+const navToggle = document.getElementById('navToggle');
 
-if (menuBtn && sideMenu) {
-    menuBtn.addEventListener('click', () => {
-        sideMenu.style.display = 'block';
+if (navToggle && topNav) {
+    navToggle.addEventListener('click', () => {
+        topNav.classList.toggle('nav-open');
     });
 }
 
-if (closeBtn && sideMenu) {
-    closeBtn.addEventListener('click', () => {
-        sideMenu.style.display = 'none';
-    });
+function normalizePath(pathname) {
+    if (!pathname) {
+        return '/';
+    }
+    const trimmed = pathname.trim();
+    if (!trimmed || trimmed === '/') {
+        return '/';
+    }
+    return trimmed.replace(/\/+$/, '');
 }
+
+function isPathMatch(current, candidate) {
+    if (!candidate) {
+        return false;
+    }
+    const normalized = normalizePath(candidate);
+    if (current === normalized) {
+        return true;
+    }
+    return current.startsWith(`${normalized}/`);
+}
+
+function applyActiveNav() {
+    const currentPath = normalizePath(window.location.pathname);
+    const navLinks = Array.from(document.querySelectorAll('.pill-nav a[data-route]'));
+    navLinks.forEach((link, index) => {
+        link.style.setProperty('--i', String(index));
+        const route = link.getAttribute('data-route') || '';
+        const aliasList = (link.getAttribute('data-aliases') || '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+
+        const matches = isPathMatch(currentPath, route) || aliasList.some((alias) => isPathMatch(currentPath, alias));
+        link.classList.toggle('active', matches);
+    });
+
+    if (topNav) {
+        navLinks.forEach((link) => {
+            link.addEventListener('click', () => {
+                topNav.classList.remove('nav-open');
+            });
+        });
+    }
+}
+
+applyActiveNav();
+document.body.classList.add('page-loaded');
+
+function pulseUpdate(node) {
+    if (!node) {
+        return;
+    }
+    node.classList.remove('pulse-update');
+    void node.offsetWidth;
+    node.classList.add('pulse-update');
+}
+
+window.pulseUpdate = pulseUpdate;
 
 const themeToggler = document.querySelector('.theme-toggler');
 const lightIcon = themeToggler?.querySelector('span:nth-child(1)');

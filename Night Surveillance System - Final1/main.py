@@ -441,9 +441,14 @@ detection_last_db_emit = {}
 detection_last_alert_emit = {}
 detection_last_snapshot_emit = {}
 
+EVENT_LOG_WORKERS = max(1, int(float(os.getenv('EVENT_LOG_WORKERS', '2'))))
+event_log_executor = ThreadPoolExecutor(max_workers=EVENT_LOG_WORKERS, thread_name_prefix='event-log')
+
 # Async image enhancement jobs
 enhancement_jobs = {}
 enhancement_jobs_lock = threading.Lock()
+ENHANCEMENT_WORKERS = max(1, int(float(os.getenv('ENHANCEMENT_WORKERS', '2'))))
+enhancement_job_executor = ThreadPoolExecutor(max_workers=ENHANCEMENT_WORKERS, thread_name_prefix='enhance-job')
 
 # Uploaded video processing sessions and summary metrics
 upload_video_sessions = {}
@@ -585,6 +590,8 @@ ENABLE_ANOMALY_ALERTS = str(os.getenv('ENABLE_ANOMALY_ALERTS', '1')).strip().low
 # Stream/detection performance tuning
 STREAM_FRAME_WIDTH = int(float(os.getenv('STREAM_FRAME_WIDTH', '640')))
 STREAM_FRAME_HEIGHT = int(float(os.getenv('STREAM_FRAME_HEIGHT', '480')))
+UPLOAD_VIDEO_FRAME_WIDTH = max(320, int(float(os.getenv('UPLOAD_VIDEO_FRAME_WIDTH', str(STREAM_FRAME_WIDTH)))))
+UPLOAD_VIDEO_FRAME_HEIGHT = max(240, int(float(os.getenv('UPLOAD_VIDEO_FRAME_HEIGHT', str(STREAM_FRAME_HEIGHT)))))
 STREAM_GRAB_SKIP = max(0, int(float(os.getenv('STREAM_GRAB_SKIP', '1'))))
 STREAM_JPEG_QUALITY = int(max(50, min(95, float(os.getenv('STREAM_JPEG_QUALITY', '75')))))
 STREAM_GRAPH_PANEL_WIDTH = int(float(os.getenv('STREAM_GRAPH_PANEL_WIDTH', '270')))
@@ -642,7 +649,7 @@ VIDEO_ENHANCE = str(os.getenv('VIDEO_ENHANCE', '0')).strip().lower() in ('1', 't
 UPLOAD_LOWLIGHT_MODE_DEFAULT = str(os.getenv('UPLOAD_LOWLIGHT_MODE_DEFAULT', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
 UPLOAD_VIDEO_REALTIME_PLAYBACK = str(os.getenv('UPLOAD_VIDEO_REALTIME_PLAYBACK', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 UPLOAD_VIDEO_FAST_ENHANCE = str(os.getenv('UPLOAD_VIDEO_FAST_ENHANCE', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
-UPLOAD_SUMMARY_POLL_SECONDS = max(2.0, float(os.getenv('UPLOAD_SUMMARY_POLL_SECONDS', '5')))
+UPLOAD_SUMMARY_POLL_SECONDS = max(1.5, float(os.getenv('UPLOAD_SUMMARY_POLL_SECONDS', '2')))
 UPLOAD_STATS_POLL_SECONDS = max(1.0, float(os.getenv('UPLOAD_STATS_POLL_SECONDS', '2.5')))
 LOWLIGHT_DETECTION_MAX_SIDE = max(480, int(float(os.getenv('LOWLIGHT_DETECTION_MAX_SIDE', '1280'))))
 LOWLIGHT_FUSION_IOU = float(os.getenv('LOWLIGHT_FUSION_IOU', '0.45'))
@@ -2581,6 +2588,97 @@ def log_surveillance_event_db(event_data):
             except Exception:
                 pass
 
+
+def log_surveillance_event_async(event_data: dict) -> None:
+    try:
+        event_log_executor.submit(log_surveillance_event_db, event_data)
+    except Exception as exc:
+        print(f"[EVENT] Async log dispatch failed: {exc}")
+
+
+def _build_anomaly_event_payload(
+    anomaly: dict,
+    camera_id: int,
+    source: str,
+    video_id: str | None = None,
+    video_path: str | None = None,
+    image_path: str | None = None,
+    frame_seq: int | None = None,
+    detect_source_seq: int | None = None,
+) -> dict:
+    class_name = str(anomaly.get('class', 'unknown') or 'unknown')
+    conf = float(anomaly.get('confidence', 0.0))
+    bbox = anomaly.get('bbox', (0, 0, 0, 0))
+    bbox_area = anomaly.get('bbox_area')
+    if bbox_area is None:
+        try:
+            bbox_area = int(max(0, int(bbox[2]) - int(bbox[0])) * max(0, int(bbox[3]) - int(bbox[1])))
+        except Exception:
+            bbox_area = 0
+
+    weapon_hit = bool(anomaly.get('weapon_model_hit', False))
+    weapon_tier = str(anomaly.get('weapon_tier') or _weapon_confidence_tier(conf))
+    if weapon_tier not in {'low', 'medium', 'high'}:
+        weapon_tier = 'low'
+
+    if weapon_tier == 'high':
+        severity = 'high'
+    elif weapon_tier == 'medium':
+        severity = 'medium'
+    else:
+        severity = 'low'
+
+    return {
+        'camera_id': camera_id,
+        'event_type': 'anomaly_detected',
+        'severity': severity,
+        'description': f"Anomaly detected: {class_name} ({conf:.2f})",
+        'details': {
+            'detection_type': class_name,
+            'confidence': round(conf, 4),
+            'weapon_model_hit': weapon_hit,
+            'weapon_tier': weapon_tier,
+            'bbox_xyxy': [int(v) for v in bbox] if bbox else [],
+            'bbox_area': int(bbox_area or 0),
+            'source': str(source or 'unknown'),
+            'frame_seq': frame_seq,
+            'detect_source_seq': detect_source_seq,
+            'video_id': video_id,
+            'video_path': video_path,
+            'image_path': image_path,
+            'detected_at': _utc_iso_now(),
+        },
+        'image_path': image_path,
+        'video_path': video_path,
+    }
+
+
+def _persist_anomaly_events_async(
+    anomalies: list[dict],
+    camera_id: int,
+    source: str,
+    video_id: str | None = None,
+    video_path: str | None = None,
+    image_path: str | None = None,
+    frame_seq: int | None = None,
+    detect_source_seq: int | None = None,
+) -> None:
+    if not anomalies:
+        return
+
+    for anomaly in anomalies:
+        payload = _build_anomaly_event_payload(
+            anomaly=anomaly,
+            camera_id=camera_id,
+            source=source,
+            video_id=video_id,
+            video_path=video_path,
+            image_path=image_path,
+            frame_seq=frame_seq,
+            detect_source_seq=detect_source_seq,
+        )
+        log_surveillance_event_async(payload)
+
 last_alert_time = 0
 # Function to send email alerts
 def send_email_alert(subject, body, to, att):
@@ -2654,6 +2752,9 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
     detect_every = max(1, int(VIDEO_DETECT_EVERY)) if is_upload_video else 1
     lowlight_video_mode = bool(UPLOAD_LOWLIGHT_MODE_DEFAULT)
+    upload_video_path = ''
+    target_frame_width = int(STREAM_FRAME_WIDTH)
+    target_frame_height = int(STREAM_FRAME_HEIGHT)
     if is_upload_video and upload_video_id:
         with upload_video_sessions_lock:
             upload_session = upload_video_sessions.get(upload_video_id) or {}
@@ -2663,6 +2764,9 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                     upload_session.get('video_enhance', UPLOAD_LOWLIGHT_MODE_DEFAULT),
                 )
             )
+            upload_video_path = str(upload_session.get('absolute_video_path', '') or '').strip()
+        target_frame_width = int(UPLOAD_VIDEO_FRAME_WIDTH)
+        target_frame_height = int(UPLOAD_VIDEO_FRAME_HEIGHT)
 
     enhance_video_frames = bool(is_upload_video and (lowlight_video_mode or VIDEO_ENHANCE))
     throttle_upload_playback = bool(is_upload_video and UPLOAD_VIDEO_REALTIME_PLAYBACK)
@@ -2736,7 +2840,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
                 local_frame_counter += 1
 
-                frame = cv2.resize(frame, (STREAM_FRAME_WIDTH, STREAM_FRAME_HEIGHT))
+                frame = cv2.resize(frame, (target_frame_width, target_frame_height))
 
                 # Night Shield fix: In low-light mode, enhance the stream-sized frame only on detection cycles.
                 if enhance_video_frames and (
@@ -2870,6 +2974,17 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
             last_counts = _count_detection_groups(tracked_detections)
             last_detect_seq = int(source_seq)
 
+            if anomalies:
+                _persist_anomaly_events_async(
+                    anomalies,
+                    camera_id=1,
+                    source='upload_video' if is_upload_video else 'live_stream',
+                    video_id=upload_video_id if is_upload_video else None,
+                    video_path=upload_video_path if is_upload_video else None,
+                    frame_seq=int(source_seq),
+                    detect_source_seq=int(source_seq),
+                )
+
             emitted_anomalies = []
             for anomaly in anomalies:
                 # Night Shield fix: Only emit real-time alerts for high-tier weapon anomalies.
@@ -2885,32 +3000,6 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                     emitted_anomalies.append(anomaly)
 
             if emitted_anomalies and ENABLE_DETECTION_SIDE_EFFECTS:
-                for anomaly in emitted_anomalies:
-                    class_name = anomaly['class']
-                    conf = anomaly['confidence']
-                    try:
-                        log_surveillance_event_db({
-                            'camera_id': 1,
-                            'event_type': 'anomaly_detected',
-                            'severity': 'high',
-                            'description': f'Anomaly detected: {class_name} with {conf:.2f} confidence',
-                            'details': {
-                                'class': class_name,
-                                'confidence': round(float(conf), 4),
-                                'weapon_model_hit': bool(anomaly.get('weapon_model_hit', False)),
-                                'weapon_tier': str(anomaly.get('weapon_tier', 'none')),
-                                'bbox_xyxy': [int(v) for v in anomaly.get('bbox', (0, 0, 0, 0))],
-                                'bbox_area': int(anomaly.get('bbox_area', 0) or 0),
-                                'frame_seq': int(source_seq),
-                                'detect_source_seq': int(last_detect_seq),
-                                'detector': str(anomaly.get('detector', 'unknown')),
-                            },
-                            'image_path': None,
-                            'video_path': None,
-                        })
-                    except Exception as exc:
-                        print(f"Failed to log anomaly: {exc}")
-
                 if SAVE_ANOMALY_FRAMES:
                     os.makedirs('static/images/anomalies', exist_ok=True)
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -3420,21 +3509,7 @@ def video_stop():
     return jsonify({'success': True, 'video_id': video_id, 'stop_requested': bool(stop_sent)})
 
 
-@app.route('/upload_video_summary')
-def upload_video_summary():
-    if 'loggedin' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    video_id = (request.args.get('video_id') or '').strip()
-    if not video_id:
-        return jsonify({'error': 'Missing video_id'}), 400
-
-    with upload_video_sessions_lock:
-        session_data = deepcopy(upload_video_sessions.get(video_id))
-
-    if not session_data:
-        return jsonify({'error': 'Video session not found'}), 404
-
+def _build_upload_video_summary_payload(video_id: str, session_data: dict) -> dict:
     frames_processed = int(session_data.get('frames_processed', 0))
     detection_frames_processed = int(session_data.get('detection_frames_processed', 0))
     total_detections = int(session_data.get('total_detections', 0))
@@ -3447,18 +3522,30 @@ def upload_video_summary():
     avg_inference_ms = (float(session_data.get('sum_inference_ms', 0.0)) / detection_frames_processed) if detection_frames_processed else 0.0
     avg_fps = (float(session_data.get('sum_fps', 0.0)) / frames_processed) if frames_processed else 0.0
 
+    status = str(session_data.get('status', 'ready'))
+    finalized = status in {'completed', 'failed', 'stopped'}
+
+    total_frames = int(session_data.get('total_frames', 0) or 0)
+    current_frame = int(session_data.get('current_frame', frames_processed) or frames_processed)
+    progress_percent = float(session_data.get('progress_percent', 0.0) or 0.0)
+    if total_frames > 0 and progress_percent <= 0.0:
+        progress_percent = min(100.0, (current_frame / total_frames) * 100.0)
+
     payload = {
         'success': True,
-        'video_id': video_id,
-        'status': str(session_data.get('status', 'ready')),
+        'video_id': str(session_data.get('video_id', video_id) or video_id),
+        'status': status,
+        'finalized': finalized,
         'video_name': str(session_data.get('video_name', 'uploaded_video')),
         'error': str(session_data.get('error', '')),
+        'updated_at': float(session_data.get('updated_at', 0.0) or 0.0),
         'summary': {
             'frames_processed': frames_processed,
             'detection_frames_processed': detection_frames_processed,
-            'current_frame': int(session_data.get('current_frame', frames_processed) or frames_processed),
-            'total_frames': int(session_data.get('total_frames', 0) or 0),
-            'progress_percent': round(float(session_data.get('progress_percent', 0.0) or 0.0), 2),
+            'current_frame': current_frame,
+            'total_frames': total_frames,
+            'progress_percent': round(progress_percent, 2),
+            'processing_fps': round(float(session_data.get('latest_fps', 0.0) or 0.0), 2),
             'total_detections': total_detections,
             'weapon_detections': int(session_data.get('weapon_detections_total', 0)),
             'total_anomalies': total_anomalies,
@@ -3479,7 +3566,74 @@ def upload_video_summary():
         'context': _build_upload_video_context(session_data),
         'graph': session_data.get('graph', {}),
     }
+    return payload
+
+
+@app.route('/upload_video_summary')
+def upload_video_summary():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    video_id = (request.args.get('video_id') or '').strip()
+    if not video_id:
+        return jsonify({'error': 'Missing video_id'}), 400
+
+    with upload_video_sessions_lock:
+        session_data = deepcopy(upload_video_sessions.get(video_id))
+
+    if not session_data:
+        return jsonify({'error': 'Video session not found'}), 404
+
+    payload = _build_upload_video_summary_payload(video_id, session_data)
     return jsonify(payload)
+
+
+@app.route('/upload_video_events')
+def upload_video_events():
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    video_id = (request.args.get('video_id') or '').strip()
+    if not video_id:
+        return jsonify({'error': 'Missing video_id'}), 400
+
+    def generate():
+        last_updated = 0.0
+        last_status = ''
+
+        while True:
+            with upload_video_sessions_lock:
+                session_data = deepcopy(upload_video_sessions.get(video_id))
+
+            if not session_data:
+                error_payload = json.dumps({'error': 'Video session not found'})
+                yield f"event: error\ndata: {error_payload}\n\n"
+                break
+
+            payload = _build_upload_video_summary_payload(video_id, session_data)
+            updated_at = float(payload.get('updated_at', 0.0) or 0.0)
+            status = str(payload.get('status', 'ready'))
+
+            if updated_at > last_updated or status != last_status:
+                last_updated = updated_at
+                last_status = status
+                yield f"data: {json.dumps(payload)}\n\n"
+            else:
+                yield ": keep-alive\n\n"
+
+            if payload.get('finalized'):
+                break
+
+            time.sleep(0.5)
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
 
 # SQLite database configuration
 DATABASE = 'night_surveillance.db'
@@ -3902,6 +4056,14 @@ def lowlight_detection():
             result_path = os.path.join(app.config['LOWLIGHT_FOLDER'], result_filename)
             cv2.imwrite(result_path, annotated)
 
+            if anomalies:
+                _persist_anomaly_events_async(
+                    anomalies,
+                    camera_id=1,
+                    source='lowlight_image',
+                    image_path=result_path,
+                )
+
             anomaly_counts = {}
             for anomaly in anomalies:
                 anomaly_key = _normalize_label(anomaly.get('class', '')) or 'unknown'
@@ -3988,12 +4150,13 @@ def image_enhancement():
         with enhancement_jobs_lock:
             enhancement_jobs[job_id] = _new_enhancement_job(job_id)
 
-        worker = threading.Thread(
-            target=_process_enhancement_job,
-            args=(job_id, original_path, image_file.filename, settings),
-            daemon=True,
+        enhancement_job_executor.submit(
+            _process_enhancement_job,
+            job_id,
+            original_path,
+            image_file.filename,
+            settings,
         )
-        worker.start()
 
         return jsonify({'success': True, 'job_id': job_id}), 202
 
@@ -4845,14 +5008,16 @@ def dataset_analytics():
                 'Detection' as type, 
                 object_class as description, 
                 timestamp,
-                confidence as value
+                confidence as value,
+                NULL as video_path
             FROM detection_results 
             UNION ALL
             SELECT 
                 'Event' as type, 
-                event_type as description, 
+                description as description, 
                 timestamp,
-                NULL as value
+                NULL as value,
+                video_path as video_path
             FROM surveillance_events
             ORDER BY timestamp DESC
             LIMIT 20
@@ -4867,9 +5032,10 @@ def dataset_analytics():
             recent_activity = conn.execute('''
                 SELECT 
                     'Event' as type,
-                    event_type as description,
+                    description as description,
                     timestamp,
-                    NULL as value
+                    NULL as value,
+                    video_path as video_path
                 FROM surveillance_events
                 ORDER BY timestamp DESC
                 LIMIT 20

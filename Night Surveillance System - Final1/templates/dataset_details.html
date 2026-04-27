@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dataset Details - Night Surveillance System</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Sharp:opsz,wght,FILL,GRAD@48,400,0,0" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-style.css') }}">
     <style>
         .dataset-details-container {
@@ -235,7 +236,10 @@
     </style>
 </head>
 <body>
-    <div class="dataset-details-container">
+    <div class="container top-nav-layout">
+        {% include 'partials/top_nav.html' %}
+        <div class="content-grid">
+            <main class="dataset-details-container">
         <!-- Dataset Header -->
         <div class="dataset-header">
             <h1 class="dataset-title">{{ dataset.dataset_name }}</h1>
@@ -385,6 +389,8 @@
             <a href="{{ url_for('datasets') }}" class="btn btn-secondary">← Back to Datasets</a>
             <a href="{{ url_for('dataset_analytics') }}" class="btn btn-primary">📊 View Analytics</a>
             <a href="{{ url_for('dashboard') }}" class="btn btn-primary">🏠 Dashboard</a>
+        </div>
+            </main>
         </div>
     </div>
 

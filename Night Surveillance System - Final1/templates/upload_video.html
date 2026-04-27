@@ -61,26 +61,44 @@
       color: var(--surface-card-text);
     }
 
-    .mode-toggle {
+    .mode-selector {
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.3rem;
       border: 1px solid var(--surface-card-border);
       border-radius: 10px;
-      padding: 0.56rem 0.72rem;
+      padding: 0.3rem;
       background: var(--surface-soft-bg);
-      color: var(--surface-card-text);
+    }
+
+    .mode-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38rem;
+      border-radius: 8px;
+      padding: 0.38rem 0.75rem;
       font-size: 0.86rem;
       font-weight: 600;
       cursor: pointer;
       user-select: none;
+      color: var(--surface-muted-text);
+      transition: background 0.15s, color 0.15s;
     }
 
-    .mode-toggle input[type="checkbox"] {
-      width: 1rem;
-      height: 1rem;
-      accent-color: #2563eb;
-      margin: 0;
+    .mode-option input[type="radio"] {
+      display: none;
+    }
+
+    .mode-option:has(input[type="radio"]:checked) {
+      background: rgba(37, 99, 235, 0.15);
+      color: #2563eb;
+      box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.3);
+    }
+
+    .dark-theme-variables .mode-option:has(input[type="radio"]:checked) {
+      background: rgba(14, 165, 233, 0.2);
+      color: #38bdf8;
+      box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.35);
     }
 
     .mode-hint {
@@ -255,6 +273,24 @@
       border-color: rgba(148, 163, 184, 0.24);
     }
 
+    .phase-badge {
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.28rem 0.68rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: rgba(14, 165, 233, 0.18);
+      color: #0284c7;
+      border: 1px solid rgba(14, 165, 233, 0.35);
+    }
+
+    .phase-badge.phase-final {
+      background: rgba(34, 197, 94, 0.2);
+      color: #15803d;
+      border-color: rgba(34, 197, 94, 0.4);
+    }
+
     .metric-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(120px, 1fr));
@@ -353,61 +389,10 @@
   </style>
 </head>
 <body>
-  <div class="container">
-    <aside>
-      <div class="top">
-        <div class="logo">
-          <h2>NIGHT <span class="danger">SHIELD</span></h2>
-        </div>
-        <div class="close" id="close_btn">
-          <span class="material-symbols-sharp">close</span>
-        </div>
-      </div>
-      <div class="sidebar">
-        <a href="/dashboard">
-          <span class="material-symbols-sharp">grid_view</span>
-          <h3>Dashboard</h3>
-        </a>
-        <a href="/addCamera">
-          <span class="material-symbols-sharp">videocam</span>
-          <h3>Video Cam</h3>
-        </a>
-        <a href="/upload" class="active">
-          <span class="material-symbols-sharp">upload</span>
-          <h3>Upload Video</h3>
-        </a>
-        <a href="/lowlight_detection">
-          <span class="material-symbols-sharp">nightlight</span>
-          <h3>Low-Light Detection</h3>
-        </a>
-        <a href="/image_enhancement">
-          <span class="material-symbols-sharp">auto_fix_high</span>
-          <h3>Image Enhancement</h3>
-        </a>
-        <a href="/datasets">
-          <span class="material-symbols-sharp">dataset</span>
-          <h3>Datasets</h3>
-        </a>
-        <a href="/surveillance_events">
-          <span class="material-symbols-sharp">security</span>
-          <h3>Events</h3>
-        </a>
-        <a href="/dataset_analytics">
-          <span class="material-symbols-sharp">analytics</span>
-          <h3>Analytics</h3>
-        </a>
-        <a href="/contact">
-          <span class="material-symbols-sharp">help</span>
-          <h3>Help</h3>
-        </a>
-        <a href="/logout">
-          <span class="material-symbols-sharp">logout</span>
-          <h3>Logout</h3>
-        </a>
-      </div>
-    </aside>
-
-    <main>
+  <div class="container top-nav-layout">
+    {% include 'partials/top_nav.html' %}
+    <div class="content-grid with-right">
+      <main>
       <h1>Upload Video</h1>
       <p style="opacity: 0.82;">Upload a video and run anomaly detection with live graph and context summary.</p>
 
@@ -418,19 +403,31 @@
       <section class="upload-card">
         <form class="upload-form" action="{{ url_for('upload_video') }}" method="post" enctype="multipart/form-data">
           <input type="file" name="video" accept=".mp4,.avi,.mov,.mkv" required>
-          <input type="hidden" name="lowlight_video_mode" value="0">
-          <label class="mode-toggle" title="Enhance dark frames before detection">
-            <input
-              type="checkbox"
-              name="lowlight_video_mode"
-              value="1"
-              {% if lowlight_video_mode %}checked{% endif %}
-            >
-            <span>Low-light video mode</span>
-          </label>
+          <div class="mode-selector" title="Select processing mode">
+            <label class="mode-option">
+              <input
+                type="radio"
+                name="lowlight_video_mode"
+                value="0"
+                {% if not lowlight_video_mode %}checked{% endif %}
+              >
+              <span class="material-symbols-sharp" style="font-size:1rem;vertical-align:middle;">wb_sunny</span>
+              Normal
+            </label>
+            <label class="mode-option">
+              <input
+                type="radio"
+                name="lowlight_video_mode"
+                value="1"
+                {% if lowlight_video_mode %}checked{% endif %}
+              >
+              <span class="material-symbols-sharp" style="font-size:1rem;vertical-align:middle;">nightlight</span>
+              Lowlight
+            </label>
+          </div>
           <button class="btn-primary" type="submit">Upload And Analyze</button>
         </form>
-        <p class="mode-hint">Enhances dark frames before detection for night-time footage.</p>
+        <p class="mode-hint">Select <b>Normal</b> for standard footage or <b>Lowlight</b> to enhance dark frames before detection.</p>
       </section>
 
       {% if video_id %}
@@ -461,6 +458,7 @@
           <div class="status-row">
             <div class="status-cluster">
               <span id="status-pill" class="status-pill status-ready">Ready</span>
+              <span id="summary-phase" class="phase-badge phase-live">Live</span>
               <span
                 id="mode-badge"
                 class="mode-badge {% if lowlight_video_mode %}mode-badge-on{% else %}mode-badge-off{% endif %}"
@@ -529,30 +527,10 @@
         </div>
       </section>
       {% endif %}
-    </main>
+      </main>
 
-    <div class="right">
-      <div class="top">
-        <button id="menu_bar">
-          <span class="material-symbols-sharp">menu</span>
-        </button>
-        <div class="theme-toggler">
-          <span class="material-symbols-sharp active">light_mode</span>
-          <span class="material-symbols-sharp">dark_mode</span>
-        </div>
-        <div class="profile">
-          <div class="info">
-            <p><b>{{ session.get('firstname', 'User') }}</b></p>
-            <p>Admin</p>
-            <small class="text-muted"></small>
-          </div>
-          <div class="profile-photo">
-            <img src="{{ url_for('static', filename='images/profile-1.jpg') }}" alt="Profile Picture">
-          </div>
-        </div>
-      </div>
-
-      <div class="recent_updates">
+      <div class="right">
+        <div class="recent_updates">
         <h2>Upload Analysis Notes</h2>
         <div class="updates">
           <div class="update">
@@ -574,6 +552,7 @@
             </div>
           </div>
         </div>
+        </div>
       </div>
     </div>
   </div>
@@ -582,21 +561,23 @@
   <script>
     const videoId = {{ (video_id or '') | tojson }};
     const summaryUrl = videoId ? `/upload_video_summary?video_id=${encodeURIComponent(videoId)}` : '';
-    const statsUrl = videoId ? `/video_stats?video_id=${encodeURIComponent(videoId)}` : '';
+    const eventsUrl = videoId ? `/upload_video_events?video_id=${encodeURIComponent(videoId)}` : '';
     const infoUrl = '/video_info';
     const stopUrl = '/video_stop';
     const summaryCanvas = document.getElementById('summary-chart');
     const stopBtn = document.getElementById('stop-video-btn');
     const themeToggleBtn = document.querySelector('.theme-toggler');
     const initialLowlightMode = {{ lowlight_video_mode | tojson }};
-    const summaryPollMs = Math.max(2000, Math.round(Number({{ upload_summary_poll_seconds | tojson }}) * 1000));
-    const statsPollMs = Math.max(1000, Math.round(Number({{ upload_stats_poll_seconds | tojson }}) * 1000));
+    const summaryPollMs = Math.max(1500, Math.round(Number({{ upload_summary_poll_seconds | tojson }}) * 1000));
 
     let pollTimer = null;
-    let statsTimer = null;
+    let eventSource = null;
     let latestGraphSnapshot = null;
-    let summaryRequestInFlight = false;
-    let statsRequestInFlight = false;
+    let lastPayloadUpdatedAt = 0;
+    let renderQueued = false;
+    let pendingPayload = null;
+    let lastChartDraw = 0;
+    let chartDrawTimer = null;
 
     function statusClass(status) {
       if (status === 'processing') return 'status-pill status-processing';
@@ -626,6 +607,18 @@
       }
     }
 
+    function setSummaryPhase(finalized) {
+      const phaseBadge = document.getElementById('summary-phase');
+      if (!phaseBadge) return;
+      if (finalized) {
+        phaseBadge.textContent = 'Final';
+        phaseBadge.classList.add('phase-final');
+      } else {
+        phaseBadge.textContent = 'Live';
+        phaseBadge.classList.remove('phase-final');
+      }
+    }
+
     function setModeBadge(isLowlightMode) {
       const badge = document.getElementById('mode-badge');
       if (!badge) return;
@@ -640,7 +633,12 @@
 
     function setMetric(id, value) {
       const node = document.getElementById(id);
-      if (node) node.textContent = value;
+      if (node) {
+        node.textContent = value;
+        if (window.pulseUpdate) {
+          window.pulseUpdate(node);
+        }
+      }
     }
 
     function formatClock(totalSec) {
@@ -654,10 +652,10 @@
       return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
-    function updateProgressUI(data) {
-      const progress = Number(data?.progress_percent || 0);
-      const currentFrame = Number(data?.current_frame || 0);
-      const totalFrames = Number(data?.total_frames || 0);
+    function updateProgressUI(summary) {
+      const progress = Number(summary?.progress_percent || 0);
+      const currentFrame = Number(summary?.current_frame || 0);
+      const totalFrames = Number(summary?.total_frames || 0);
 
       const progressFill = document.getElementById('progress-fill');
       if (progressFill) {
@@ -676,22 +674,22 @@
 
       const procFps = document.getElementById('proc-fps');
       if (procFps) {
-        procFps.textContent = Number(data?.processing_fps || 0).toFixed(1);
+        procFps.textContent = Number(summary?.processing_fps || 0).toFixed(1);
       }
 
       const procDetections = document.getElementById('proc-detections');
       if (procDetections) {
-        procDetections.textContent = String(Number(data?.total_detections || 0));
+        procDetections.textContent = String(Number(summary?.total_detections || 0));
       }
 
       const procElapsed = document.getElementById('proc-elapsed');
       if (procElapsed) {
-        procElapsed.textContent = formatClock(data?.elapsed_sec || 0);
+        procElapsed.textContent = formatClock(summary?.elapsed_sec || 0);
       }
 
       const procEta = document.getElementById('proc-eta');
       if (procEta) {
-        procEta.textContent = formatClock(data?.eta_sec || 0);
+        procEta.textContent = formatClock(summary?.eta_sec || 0);
       }
     }
 
@@ -718,35 +716,6 @@
         }
       } catch (err) {
         console.warn('Video info fetch failed:', err);
-      }
-    }
-
-    async function fetchVideoStats() {
-      if (!statsUrl) return;
-      if (statsRequestInFlight) return;
-      statsRequestInFlight = true;
-      try {
-        const response = await fetch(statsUrl, { cache: 'no-store' });
-        const data = await response.json();
-
-        if (!response.ok || !data?.success) {
-          return;
-        }
-
-        setStatus(data.status || 'ready', '');
-        setModeBadge(Boolean(data.lowlight_video_mode));
-        updateProgressUI(data);
-
-        if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
-          if (statsTimer) {
-            clearInterval(statsTimer);
-            statsTimer = null;
-          }
-        }
-      } catch (err) {
-        console.warn('Video stats fetch failed:', err);
-      } finally {
-        statsRequestInFlight = false;
       }
     }
 
@@ -839,10 +808,10 @@
       const weapons = Array.isArray(graph?.weapons) ? graph.weapons : [];
 
       const points = Math.max(detections.length, anomalies.length, persons.length, weapons.length);
-      if (points < 2) {
+      if (points < 1) {
         ctx.fillStyle = palette.waiting;
         ctx.font = '14px sans-serif';
-        ctx.fillText('Waiting for enough points to render graph...', 20, 32);
+        ctx.fillText('Waiting for detection data...', 20, 32);
         return;
       }
 
@@ -912,106 +881,172 @@
       });
     }
 
-    async function fetchSummary() {
-      if (!summaryUrl) return;
-      if (summaryRequestInFlight) return;
-      summaryRequestInFlight = true;
+    function scheduleChartDraw() {
+      if (!latestGraphSnapshot) {
+        return;
+      }
+      const now = performance.now();
+      if (now - lastChartDraw > 200) {
+        drawSummaryChart(latestGraphSnapshot);
+        lastChartDraw = now;
+        return;
+      }
 
+      if (chartDrawTimer) {
+        return;
+      }
+      chartDrawTimer = setTimeout(() => {
+        chartDrawTimer = null;
+        drawSummaryChart(latestGraphSnapshot);
+        lastChartDraw = performance.now();
+      }, 220);
+    }
+
+    function applyPayload(payload) {
+      if (!payload || !payload.success) {
+        return;
+      }
+
+      const updatedAt = Number(payload.updated_at || 0);
+      if (updatedAt && updatedAt <= lastPayloadUpdatedAt) {
+        return;
+      }
+      lastPayloadUpdatedAt = updatedAt;
+
+      const summary = payload.summary || {};
+      const context = payload.context || {};
+      const finalized = Boolean(payload.finalized);
+
+      setStatus(payload.status, payload.error || '');
+      setSummaryPhase(finalized);
+      setModeBadge(Boolean(summary.lowlight_video_mode));
+      updateProgressUI(summary);
+
+      setMetric('metric-frames', formatNumber(summary.frames_processed));
+      setMetric('metric-detections', formatNumber(summary.total_detections));
+      setMetric('metric-anomalies', formatNumber(summary.total_anomalies));
+      setMetric('metric-duration', formatNumber(summary.duration_sec));
+      setMetric('metric-inference', `${formatNumber(summary.avg_inference_ms)} ms`);
+      setMetric('metric-fps', formatNumber(summary.avg_fps));
+      setMetric('metric-peak', formatNumber(summary.peak_detections));
+      setMetric('metric-risk', finalized ? String(context.risk_level || 'low') : 'live');
+
+      const narrativeNode = document.getElementById('context-narrative');
+      if (narrativeNode) {
+        if (finalized) {
+          const narrative = context.narrative || 'Processing context not available yet.';
+          const anomalyRate = Number(context.anomaly_rate_percent || 0).toFixed(2);
+          narrativeNode.textContent = `${narrative} Anomaly rate: ${anomalyRate}%`;
+        } else {
+          narrativeNode.textContent = 'Processing in progress... final context summary will appear when complete.';
+        }
+      }
+
+      if (finalized) {
+        renderCountList('top-classes-list', context.top_detected_classes, 'No detections');
+        renderCountList('top-anomaly-list', context.top_anomaly_classes, 'No anomalies');
+      } else {
+        renderCountList('top-classes-list', [], 'Processing');
+        renderCountList('top-anomaly-list', [], 'Processing');
+      }
+
+      latestGraphSnapshot = payload.graph || {};
+      scheduleChartDraw();
+
+      const videoName = document.getElementById('video-name');
+      if (videoName && payload.video_name) {
+        videoName.textContent = payload.video_name;
+      }
+
+      if (finalized) {
+        stopRealtimeUpdates();
+      }
+    }
+
+    function scheduleRender(payload) {
+      pendingPayload = payload;
+      if (renderQueued) {
+        return;
+      }
+      renderQueued = true;
+      requestAnimationFrame(() => {
+        renderQueued = false;
+        if (pendingPayload) {
+          applyPayload(pendingPayload);
+          pendingPayload = null;
+        }
+      });
+    }
+
+    async function fetchSummaryOnce() {
+      if (!summaryUrl) return;
       try {
         const response = await fetch(summaryUrl, { cache: 'no-store' });
         const data = await response.json();
-
         if (!response.ok || !data?.success) {
           setStatus('failed', data?.error || 'Could not load summary.');
-          if (pollTimer) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-          }
+          stopRealtimeUpdates();
           return;
         }
-
-        setStatus(data.status, data.error || '');
-        setMetric('metric-frames', formatNumber(data.summary?.frames_processed));
-        setMetric('metric-detections', formatNumber(data.summary?.total_detections));
-        setMetric('metric-anomalies', formatNumber(data.summary?.total_anomalies));
-        setMetric('metric-duration', formatNumber(data.summary?.duration_sec));
-        setMetric('metric-inference', `${formatNumber(data.summary?.avg_inference_ms)} ms`);
-        setMetric('metric-fps', formatNumber(data.summary?.avg_fps));
-        setMetric('metric-peak', formatNumber(data.summary?.peak_detections));
-        setMetric('metric-risk', String(data.context?.risk_level || 'low'));
-
-        const narrativeNode = document.getElementById('context-narrative');
-        if (narrativeNode) {
-          const narrative = data.context?.narrative || 'Processing context not available yet.';
-          const anomalyRate = Number(data.context?.anomaly_rate_percent || 0).toFixed(2);
-          narrativeNode.textContent = `${narrative} Anomaly rate: ${anomalyRate}%`;
-        }
-
-        renderCountList('top-classes-list', data.context?.top_detected_classes, 'No detections yet');
-        renderCountList('top-anomaly-list', data.context?.top_anomaly_classes, 'No anomalies yet');
-        latestGraphSnapshot = data.graph || {};
-        drawSummaryChart(latestGraphSnapshot);
-
-        const videoName = document.getElementById('video-name');
-        if (videoName && data.video_name) {
-          videoName.textContent = data.video_name;
-        }
-
-        if (data.status === 'completed' || data.status === 'failed') {
-          if (pollTimer) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-          }
-          if (statsTimer) {
-            clearInterval(statsTimer);
-            statsTimer = null;
-          }
-        }
-
-        if (data.status === 'stopped') {
-          if (pollTimer) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-          }
-          if (statsTimer) {
-            clearInterval(statsTimer);
-            statsTimer = null;
-          }
-        }
+        scheduleRender(data);
       } catch (error) {
         setStatus('failed', `Summary polling error: ${error.message}`);
-        if (pollTimer) {
-          clearInterval(pollTimer);
-          pollTimer = null;
+        stopRealtimeUpdates();
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
+      pollTimer = setInterval(fetchSummaryOnce, summaryPollMs);
+      fetchSummaryOnce();
+    }
+
+    function startEventStream() {
+      if (!eventsUrl || !window.EventSource) {
+        startPolling();
+        return;
+      }
+
+      eventSource = new EventSource(eventsUrl);
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          scheduleRender(payload);
+        } catch (err) {
+          console.warn('Upload events parse error:', err);
         }
-        if (statsTimer) {
-          clearInterval(statsTimer);
-          statsTimer = null;
+      };
+
+      eventSource.onerror = () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
         }
-      } finally {
-        summaryRequestInFlight = false;
+        startPolling();
+      };
+    }
+
+    function stopRealtimeUpdates() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
       }
     }
 
     if (videoId) {
       fetchVideoInfo();
-      fetchVideoStats();
-      fetchSummary();
-      pollTimer = setInterval(fetchSummary, summaryPollMs);
-      statsTimer = setInterval(fetchVideoStats, statsPollMs);
-      window.addEventListener('resize', () => {
-        if (latestGraphSnapshot) {
-          drawSummaryChart(latestGraphSnapshot);
-        }
-      });
+      startEventStream();
+      window.addEventListener('resize', scheduleChartDraw);
     }
 
     if (themeToggleBtn) {
-      themeToggleBtn.addEventListener('click', () => {
-        if (latestGraphSnapshot) {
-          drawSummaryChart(latestGraphSnapshot);
-        }
-      });
+      themeToggleBtn.addEventListener('click', scheduleChartDraw);
     }
   </script>
 </body>
