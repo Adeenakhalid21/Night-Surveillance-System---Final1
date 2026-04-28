@@ -21,11 +21,10 @@
            </div>
 
         
-        <div id="video-container ">
-            <video width="640" height="360" controls>
-                <source src="{{ url_for('static', filename='videos/'+ video_name) }}">
-                type="video/mp4">
-            </video>
+        <div id="video-container">
+          <video width="640" height="360" controls>
+            <source src="{{ url_for('static', filename='videos/'+ video_name) }}" type="video/mp4">
+          </video>
         </div>
 
       
@@ -70,11 +69,8 @@
      
     </div>
 
+    </div>
   </div>
-
-
-     </div>
-     </div>
 
      <!-- Footer -->
    <footer>

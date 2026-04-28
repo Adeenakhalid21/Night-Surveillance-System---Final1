@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
-from PIL import Image
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from flask import Flask, render_template, Response, request, jsonify, redirect, url_for, session
 import sqlite3
 import re, os
@@ -4774,116 +4775,260 @@ def _build_surveillance_report_lines(report_title: str, events: list[dict], stat
     return lines
 
 
-def _escape_pdf_text(value: str) -> str:
-    text_value = str(value or '')
-    text_value = text_value.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
-    text_value = text_value.replace('\r', ' ').replace('\t', '    ')
-    return text_value
+def _load_font(size: int, bold: bool = False):
+    font_candidates = []
+    if os.name == 'nt':
+        font_candidates.extend([
+            r'C:\Windows\Fonts\segoeui.ttf' if not bold else r'C:\Windows\Fonts\segoeuib.ttf',
+            r'C:\Windows\Fonts\arial.ttf' if not bold else r'C:\Windows\Fonts\arialbd.ttf',
+        ])
+    font_candidates.extend([
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf',
+    ])
+
+    for font_path in font_candidates:
+        if font_path and os.path.exists(font_path):
+            try:
+                return ImageFont.truetype(font_path, size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
 
 
-def _build_plain_text_pdf(report_title: str, report_lines: list[str]) -> bytes:
-    page_width = 595
-    page_height = 842
-    margin_x = 40
-    top_y = 805
-    line_step = 13
-    usable_lines_per_page = 52
+def _wrap_draw_text(draw, text: str, font, max_width: int) -> list[str]:
+    text_value = str(text or '').strip()
+    if not text_value:
+        return ['']
 
-    normalized_lines: list[str] = []
-    for raw_line in report_lines:
-        line_text = str(raw_line or '')
-        wrapped = textwrap.wrap(
-            line_text,
-            width=96,
-            break_long_words=True,
-            replace_whitespace=False,
-            drop_whitespace=False,
-        )
-        if not wrapped:
-            normalized_lines.append('')
-        else:
-            normalized_lines.extend(wrapped)
+    lines: list[str] = []
+    for paragraph in text_value.splitlines():
+        paragraph = paragraph.strip()
+        if not paragraph:
+            lines.append('')
+            continue
 
-    if not normalized_lines:
-        normalized_lines = ['No report data available.']
+        words = paragraph.split()
+        if not words:
+            lines.append('')
+            continue
 
-    pages: list[list[str]] = []
-    current_page: list[str] = []
-    for line in normalized_lines:
-        current_page.append(line)
-        if len(current_page) >= usable_lines_per_page:
-            pages.append(current_page)
-            current_page = []
-    if current_page:
-        pages.append(current_page)
+        current_line = words[0]
+        for word in words[1:]:
+            candidate = f'{current_line} {word}'
+            if draw.textlength(candidate, font=font) <= max_width:
+                current_line = candidate
+            else:
+                lines.append(current_line)
+                current_line = word
+        lines.append(current_line)
 
-    page_count = max(1, len(pages))
+    return lines or ['']
 
-    catalog_id = 1
-    pages_id = 2
-    font_id = 3
-    first_page_id = 4
 
-    page_object_ids = [first_page_id + (idx * 2) for idx in range(page_count)]
-    content_object_ids = [object_id + 1 for object_id in page_object_ids]
-    total_objects = 3 + (page_count * 2)
+def _build_surveillance_report_pdf(report_title: str, events: list[dict], stats: dict) -> bytes:
+    page_size = (1240, 1754)
+    margin = 72
+    content_width = page_size[0] - (margin * 2)
+    card_gap = 18
+    page_bg = '#f8fafc'
+    surface = '#ffffff'
+    surface_alt = '#f1f5f9'
+    border = '#dbe4ee'
+    title_color = '#0f172a'
+    muted = '#475569'
+    accent = '#0ea5e9'
+    accent_soft = '#e0f2fe'
+    danger = '#ef4444'
+    warning = '#f59e0b'
+    success = '#22c55e'
 
-    objects: dict[int, bytes] = {}
-    objects[catalog_id] = f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode('latin-1')
-    kids_list = ' '.join([f"{page_id} 0 R" for page_id in page_object_ids])
-    objects[pages_id] = f"<< /Type /Pages /Kids [{kids_list}] /Count {page_count} >>".encode('latin-1')
-    objects[font_id] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    title_font = _load_font(30, bold=True)
+    section_font = _load_font(20, bold=True)
+    body_font = _load_font(15, bold=False)
+    small_font = _load_font(13, bold=False)
+    tiny_font = _load_font(12, bold=False)
+    mono_font = _load_font(13, bold=False)
 
     generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    for idx in range(page_count):
-        page_id = page_object_ids[idx]
-        content_id = content_object_ids[idx]
-        lines = pages[idx] if idx < len(pages) else []
+    logo_path = os.path.join(BASE_DIR, 'static', 'images', 'numl_logo.png')
+    logo_image = None
+    if os.path.exists(logo_path):
+        try:
+            with Image.open(logo_path) as logo_source:
+                logo_image = logo_source.convert('RGBA')
+        except Exception:
+            logo_image = None
 
-        stream_commands = [
-            'BT',
-            '/F1 10 Tf',
-            f"{margin_x} {top_y} Td",
-            f"({_escape_pdf_text(f'{report_title}  page {idx + 1}/{page_count}')}) Tj",
-            f"0 -{line_step} Td ({_escape_pdf_text(f'generated_at: {generated_at}')}) Tj",
-            f"0 -{line_step + 2} Td",
-        ]
+    pages: list[Image.Image] = []
+    page = Image.new('RGB', page_size, page_bg)
+    draw = ImageDraw.Draw(page)
 
-        for line in lines:
-            stream_commands.append(f"({_escape_pdf_text(line)}) Tj")
-            stream_commands.append(f"0 -{line_step} Td")
+    def measure(text: str, font) -> int:
+        bbox = draw.textbbox((0, 0), str(text), font=font)
+        return bbox[2] - bbox[0]
 
-        stream_commands.append('ET')
-        stream_data = '\n'.join(stream_commands).encode('latin-1', errors='replace')
+    def card_height(lines: list[str], font, padding_y: int = 18, line_gap: int = 8) -> int:
+        return padding_y * 2 + sum((draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1]) for line in lines) + (max(0, len(lines) - 1) * line_gap)
 
-        content_header = f"<< /Length {len(stream_data)} >>\nstream\n".encode('latin-1')
-        objects[content_id] = content_header + stream_data + b"\nendstream"
+    def draw_rounded_box(x1, y1, x2, y2, fill, outline=border, radius=22, width=1):
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill, outline=outline, width=width)
 
-        objects[page_id] = (
-            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {page_width} {page_height}] "
-            f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
-        ).encode('latin-1')
+    def draw_text_block(x, y, text_lines, font, fill=title_color, line_gap=8):
+        current_y = y
+        for line in text_lines:
+            draw.text((x, current_y), line, fill=fill, font=font)
+            bbox = draw.textbbox((0, 0), line, font=font)
+            current_y += (bbox[3] - bbox[1]) + line_gap
+        return current_y
 
-    pdf_bytes = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0] * (total_objects + 1)
+    def draw_metric_card(x, y, w, h, label, value, accent_fill):
+        draw_rounded_box(x, y, x + w, y + h, surface, border, radius=24)
+        draw.rounded_rectangle((x + 16, y + 16, x + 20, y + h - 16), radius=2, fill=accent_fill)
+        draw.text((x + 34, y + 18), label, fill=muted, font=tiny_font)
+        draw.text((x + 34, y + 46), str(value), fill=title_color, font=section_font)
 
-    for object_id in range(1, total_objects + 1):
-        offsets[object_id] = len(pdf_bytes)
-        pdf_bytes.extend(f"{object_id} 0 obj\n".encode('latin-1'))
-        pdf_bytes.extend(objects[object_id])
-        pdf_bytes.extend(b"\nendobj\n")
+    def start_new_page():
+        nonlocal page, draw
+        pages.append(page)
+        page = Image.new('RGB', page_size, page_bg)
+        draw = ImageDraw.Draw(page)
 
-    xref_start = len(pdf_bytes)
-    pdf_bytes.extend(f"xref\n0 {total_objects + 1}\n".encode('latin-1'))
-    pdf_bytes.extend(b"0000000000 65535 f \n")
+    current_y = margin
 
-    for object_id in range(1, total_objects + 1):
-        pdf_bytes.extend(f"{offsets[object_id]:010d} 00000 n \n".encode('latin-1'))
+    # Header
+    draw_rounded_box(margin, current_y, page_size[0] - margin, current_y + 150, surface, border, radius=28)
+    draw_rounded_box(margin + 22, current_y + 22, margin + 124, current_y + 128, accent_soft, accent_soft, radius=28)
+    if logo_image is not None:
+        logo_canvas_size = (92, 92)
+        logo_canvas = Image.new('RGBA', logo_canvas_size, (0, 0, 0, 0))
+        fitted_logo = ImageOps.contain(logo_image, (84, 84))
+        logo_offset = ((logo_canvas_size[0] - fitted_logo.width) // 2, (logo_canvas_size[1] - fitted_logo.height) // 2)
+        logo_canvas.paste(fitted_logo, logo_offset, fitted_logo if fitted_logo.mode == 'RGBA' else None)
+        page.paste(logo_canvas, (margin + 22, current_y + 26), logo_canvas)
+    else:
+        draw.text((margin + 40, current_y + 58), 'NUML', fill=accent, font=section_font)
+    draw.text((margin + 144, current_y + 28), report_title, fill=title_color, font=title_font)
+    draw.text((margin + 144, current_y + 74), f'Generated at {generated_at}', fill=muted, font=body_font)
+    draw.text((margin + 144, current_y + 104), 'Clean surveillance report with summary metrics and recent events.', fill=muted, font=small_font)
+    current_y += 176
 
-    pdf_bytes.extend(
-        f"trailer\n<< /Size {total_objects + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode('latin-1')
-    )
-    return bytes(pdf_bytes)
+    # Summary cards
+    stats_values = [
+        ('Total Events', int(stats.get('total_events', 0) or 0), accent),
+        ('High Severity', int(stats.get('high_events', 0) or 0), danger),
+        ('Medium Severity', int(stats.get('medium_events', 0) or 0), warning),
+        ('Low Severity', int(stats.get('low_events', 0) or 0), success),
+        ('Detections', int(stats.get('detection_events', 0) or 0), '#8b5cf6'),
+        ('Sessions', int(stats.get('session_summaries', 0) or 0), '#14b8a6'),
+    ]
+    card_w = int((content_width - (2 * card_gap)) / 3)
+    card_h = 112
+    for idx, (label, value, fill_color) in enumerate(stats_values):
+        row = idx // 3
+        col = idx % 3
+        x = margin + (col * (card_w + card_gap))
+        y = current_y + (row * (card_h + card_gap))
+        draw_metric_card(x, y, card_w, card_h, label, value, fill_color)
+    current_y += (card_h * 2) + card_gap + 26
+
+    # Top event types
+    type_breakdown = list(stats.get('type_breakdown', []) or [])
+    draw_rounded_box(margin, current_y, page_size[0] - margin, current_y + 250, surface, border, radius=28)
+    draw.text((margin + 24, current_y + 18), 'Top Event Types', fill=title_color, font=section_font)
+    if type_breakdown:
+        max_total = max(1, max(int(item.get('total', 0) or 0) for item in type_breakdown[:5]))
+        bar_left = margin + 24
+        bar_top = current_y + 64
+        bar_width = page_size[0] - (margin * 2) - 48
+        bar_height = 24
+        for idx, item in enumerate(type_breakdown[:5]):
+            item_name = str(item.get('event_type', 'event'))
+            total = int(item.get('total', 0) or 0)
+            y = bar_top + (idx * 34)
+            draw.text((bar_left, y - 2), item_name, fill=muted, font=body_font)
+            fill_width = int((total / max_total) * (bar_width * 0.55))
+            draw.rounded_rectangle((bar_left + 210, y, bar_left + 210 + fill_width, y + bar_height), radius=10, fill=accent)
+            draw.rounded_rectangle((bar_left + 210, y, bar_left + 210 + (bar_width * 0.55), y + bar_height), radius=10, outline=border, width=1)
+            draw.text((bar_left + 220 + int(bar_width * 0.55), y - 1), str(total), fill=title_color, font=body_font)
+    else:
+        draw.text((margin + 24, current_y + 84), 'No event types available.', fill=muted, font=body_font)
+    current_y += 286
+
+    # Events section
+    draw.text((margin, current_y), 'Recent Events', fill=title_color, font=section_font)
+    current_y += 34
+
+    if not events:
+        draw_rounded_box(margin, current_y, page_size[0] - margin, current_y + 120, surface, border, radius=24)
+        draw.text((margin + 24, current_y + 44), 'No events found for the selected scope.', fill=muted, font=body_font)
+        current_y += 140
+    else:
+        event_index = 0
+        while event_index < len(events):
+            if current_y > page_size[1] - 220:
+                start_new_page()
+                current_y = margin
+                draw.text((margin, current_y), 'Recent Events (continued)', fill=title_color, font=section_font)
+                current_y += 34
+
+            event = events[event_index]
+            timestamp = str(event.get('timestamp_text') or event.get('timestamp') or '')
+            event_type = str(event.get('event_type') or 'event')
+            severity = str(event.get('severity') or 'medium').lower()
+            camera_name = str(event.get('camname') or 'N/A')
+            description_text = str(event.get('description_text') or '').strip()
+            image_path = str(event.get('image_path') or '').strip()
+            video_path = str(event.get('video_path') or '').strip()
+
+            severity_fill = {'high': danger, 'medium': warning, 'low': success}.get(severity, accent)
+            severity_bg = {'high': '#fef2f2', 'medium': '#fffbeb', 'low': '#ecfdf5'}.get(severity, accent_soft)
+
+            desc_lines = _wrap_draw_text(draw, description_text or 'No description available.', small_font, page_size[0] - (margin * 2) - 64)
+            meta_lines = [f'Time: {timestamp}', f'Type: {event_type}', f'Camera: {camera_name}']
+            if image_path:
+                meta_lines.append(f'Image: {image_path}')
+            if video_path:
+                meta_lines.append(f'Video: {video_path}')
+
+            block_height = 24 + (len(meta_lines) * 18) + 16 + card_height(desc_lines, small_font, padding_y=0, line_gap=5)
+            if current_y + block_height > page_size[1] - 100:
+                start_new_page()
+                current_y = margin
+                draw.text((margin, current_y), 'Recent Events (continued)', fill=title_color, font=section_font)
+                current_y += 34
+
+            draw_rounded_box(margin, current_y, page_size[0] - margin, current_y + block_height, surface, border, radius=24)
+            draw.rounded_rectangle((margin + 18, current_y + 18, margin + 114, current_y + 48), radius=14, fill=severity_bg)
+            draw.text((margin + 32, current_y + 23), severity.upper(), fill=severity_fill, font=tiny_font)
+            draw.text((margin + 138, current_y + 21), f'#{event_index + 1}', fill=muted, font=body_font)
+
+            meta_y = current_y + 56
+            for meta_line in meta_lines:
+                draw.text((margin + 24, meta_y), meta_line, fill=muted, font=tiny_font)
+                meta_y += 18
+
+            desc_y = meta_y + 8
+            draw.text((margin + 24, desc_y), 'Description', fill=title_color, font=body_font)
+            desc_y += 24
+            desc_y = draw_text_block(margin + 24, desc_y, desc_lines, small_font, fill=title_color, line_gap=5)
+
+            current_y += block_height + 16
+            event_index += 1
+
+    pages.append(page)
+
+    total_pages = len(pages)
+    for page_number, page_image in enumerate(pages, start=1):
+        footer_draw = ImageDraw.Draw(page_image)
+        footer_text = f'Page {page_number} of {total_pages}  |  Night Shield'
+        footer_bbox = footer_draw.textbbox((0, 0), footer_text, font=tiny_font)
+        footer_width = footer_bbox[2] - footer_bbox[0]
+        footer_draw.text((page_size[0] - margin - footer_width, page_size[1] - 44), footer_text, fill=muted, font=tiny_font)
+
+    output = BytesIO()
+    pages[0].save(output, format='PDF', save_all=True, append_images=pages[1:])
+    return output.getvalue()
 
 @app.route('/surveillance_events')
 def surveillance_events():
@@ -4902,7 +5047,7 @@ def surveillance_events():
         events=events,
         stats=stats,
         page_title='Surveillance Events',
-        page_subtitle='Detailed event, session, and detection logs in plain-text format.',
+        page_subtitle='Detailed event, session, and detection logs in a structured report layout.',
         download_pdf_url=url_for('download_surveillance_events_pdf', scope='all', limit=limit),
         active_scope='all',
     )
@@ -4925,7 +5070,7 @@ def auth_logs():
         events=events,
         stats=stats,
         page_title='Authentication Logs',
-        page_subtitle='Login success and failure history with detailed text metadata.',
+        page_subtitle='Login success and failure history with structured event metadata.',
         download_pdf_url=url_for('download_surveillance_events_pdf', scope='auth', limit=limit),
         active_scope='auth',
     )
@@ -4951,8 +5096,7 @@ def download_surveillance_events_pdf():
         report_title = 'Night Shield Surveillance Events Report'
 
     events, stats = _load_surveillance_events_view(limit=max(1, min(2000, limit)), event_types=selected_types)
-    report_lines = _build_surveillance_report_lines(report_title=report_title, events=events, stats=stats)
-    pdf_bytes = _build_plain_text_pdf(report_title=report_title, report_lines=report_lines)
+    pdf_bytes = _build_surveillance_report_pdf(report_title=report_title, events=events, stats=stats)
 
     timestamp_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
     scope_suffix = 'auth' if scope == 'auth' else 'events'

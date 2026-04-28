@@ -70,12 +70,14 @@ body {
     font-size: 1.1rem;
 }
 
-.brand-dot {
-    width: 0.75rem;
-    height: 0.75rem;
+.brand-logo {
+    width: 3rem;
+    height: 3rem;
     border-radius: 50%;
-    background: var(--accent-green);
-    box-shadow: 0 0 18px rgba(0, 255, 136, 0.7);
+    object-fit: cover;
+    background: #fff;
+    box-shadow: 0 0 18px rgba(0, 255, 136, 0.25);
+    flex: 0 0 auto;
 }
 
 .site-nav {

@@ -1,6 +1,6 @@
 <header class="top-nav" aria-label="Primary">
   <div class="brand">
-    <span class="brand-mark" aria-hidden="true"></span>
+    <img class="brand-logo" src="{{ url_for('static', filename='images/numl_logo.png') }}" alt="NUML Logo">
     <span class="brand-text">Night Shield</span>
   </div>
 
@@ -13,13 +13,9 @@
       <span class="material-symbols-sharp">grid_view</span>
       <span class="nav-label">Surveillance</span>
     </a>
-    <a href="/addCamera" data-route="/addCamera" data-aliases="/preview" title="Video Cam">
-      <span class="material-symbols-sharp">videocam</span>
-      <span class="nav-label">Video Cam</span>
-    </a>
     <a href="/upload" data-route="/upload" data-aliases="/upload_video,/upload_video_feed,/upload_video_summary" title="Upload Video">
-      <span class="material-symbols-sharp">upload</span>
-      <span class="nav-label">Upload</span>
+      <span class="material-symbols-sharp">videocam</span>
+      <span class="nav-label">Video Upload</span>
     </a>
     <a href="/lowlight_detection" data-route="/lowlight_detection" title="Low-Light Detection">
       <span class="material-symbols-sharp">nightlight</span>

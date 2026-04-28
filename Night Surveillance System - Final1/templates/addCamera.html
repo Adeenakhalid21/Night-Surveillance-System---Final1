@@ -37,40 +37,40 @@
           </div>
         </div>
         <form action="{{ url_for('cam') }}" method="POST">
-        <div class="camera-form" id="camera-form-1">
-          <label for="camera-name">Camera Name:</label>
-          <input type="text" name="camname" id="camera-name" />
-          <label for="camera-url">Camera URL:</label>
-          <input type="text" name="camurl" id="camera-url" />
-          <label for="camera-resolution">Camera Resolution:</label>
-          <select id="camera-resolution">
-            <option value="1280x720">1280x720</option>
-            <option value="1920x1080">1920x1080</option>
-            <option value="2560x1440">2560x1440</option>
-          </select>
-          <label for="camera-fps">Camera FPS (0-60):</label>
-          <input type="number" name="camfps" id="camera-fps" min="0" max="60" step="1" oninput="validateCameraFPS(this)" />
-          <button type="submit" id="addCameraBtn">Add Camera</button>
-        </div>
+          <div class="camera-form" id="camera-form-1">
+            <label for="camera-name">Camera Name:</label>
+            <input type="text" name="camname" id="camera-name" />
+            <label for="camera-url">Camera URL:</label>
+            <input type="text" name="camurl" id="camera-url" />
+            <label for="camera-resolution">Camera Resolution:</label>
+            <select id="camera-resolution">
+              <option value="1280x720">1280x720</option>
+              <option value="1920x1080">1920x1080</option>
+              <option value="2560x1440">2560x1440</option>
+            </select>
+            <label for="camera-fps">Camera FPS (0-60):</label>
+            <input type="number" name="camfps" id="camera-fps" min="0" max="60" step="1" oninput="validateCameraFPS(this)" />
+            <button type="submit" id="addCameraBtn">Add Camera</button>
+          </div>
         </form>
         <form action="{{ url_for('cam') }}" method="POST">
-        <div class="camera-form" id="camera-form-2">
-          <label for="camera-name">Camera Name:</label>
-          <input type="text" name="camname" id="camera-name" />
-          <label for="camera-url">Camera URL:</label>
-          <input type="text" name="camurl" id="camera-url" />
-          <label for="camera-resolution">Camera Resolution:</label>
-          <select id="camera-resolution">
-            <option value="1280x720">1280x720</option>
-            <option value="1920x1080">1920x1080</option>
-            <option value="2560x1440">2560x1440</option>
-          </select>
-          <label for="camera-fps">Camera FPS (0-60):</label>
-          <input type="number" name="camfps" id="camera-fps" min="0" max="60" step="1" oninput="validateCameraFPS(this)" />
-          <button type="button" id="addCameraBtn">Add Camera</button>
-        </div>
+          <div class="camera-form" id="camera-form-2">
+            <label for="camera-name">Camera Name:</label>
+            <input type="text" name="camname" id="camera-name" />
+            <label for="camera-url">Camera URL:</label>
+            <input type="text" name="camurl" id="camera-url" />
+            <label for="camera-resolution">Camera Resolution:</label>
+            <select id="camera-resolution">
+              <option value="1280x720">1280x720</option>
+              <option value="1920x1080">1920x1080</option>
+              <option value="2560x1440">2560x1440</option>
+            </select>
+            <label for="camera-fps">Camera FPS (0-60):</label>
+            <input type="number" name="camfps" id="camera-fps" min="0" max="60" step="1" oninput="validateCameraFPS(this)" />
+            <button type="button" id="addCameraBtn">Add Camera</button>
+          </div>
+        </form>
       </div>
-      </form>
       
 
       </main>
@@ -116,11 +116,8 @@
      
     </div>
 
+    </div>
   </div>
-
-
-     </div>
-     </div>
 
      <!-- Footer -->
    <footer>

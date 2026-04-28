@@ -1289,12 +1289,14 @@ body:not(.dark-theme-variables) footer {
   color: var(--clr-dark);
 }
 
-.brand-mark {
-  width: 14px;
-  height: 14px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, #0ea5e9, #22c55e);
-  box-shadow: 0 4px 10px rgba(14, 165, 233, 0.35);
+.brand-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #fff;
+  padding: 0;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.18);
 }
 
 .nav-toggle {
@@ -1349,7 +1351,9 @@ body:not(.dark-theme-variables) footer {
 .pill-nav a.active {
   background: var(--nav-active-bg);
   color: var(--nav-active-text);
-  box-shadow: 0 0 0 1px var(--nav-active-ring);
+  box-shadow: 0 0 0 1px var(--nav-active-ring), 0 10px 22px rgba(14, 165, 233, 0.18);
+  font-weight: 700;
+  transform: translateY(-1px);
 }
 
 .pill-nav a.nav-logout {
@@ -1372,6 +1376,26 @@ body:not(.dark-theme-variables) footer {
   background: var(--surface-bg);
   border: 1px solid var(--surface-border);
   box-shadow: var(--surface-shadow);
+}
+
+.nav-actions .theme-toggler span {
+  opacity: 0.45;
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.nav-actions .theme-toggler span.active {
+  opacity: 1;
+  background: var(--nav-active-bg);
+  color: var(--nav-active-text);
+  box-shadow: 0 0 0 1px var(--nav-active-ring), 0 8px 18px rgba(14, 165, 233, 0.16);
+  border-radius: 999px;
+  transform: scale(1.04);
+}
+
+.dark-theme-variables .nav-actions .theme-toggler span.active {
+  background: rgba(56, 189, 248, 0.28);
+  color: #f8fafc;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.45), 0 8px 18px rgba(2, 6, 23, 0.24);
 }
 
 .nav-actions .profile {
