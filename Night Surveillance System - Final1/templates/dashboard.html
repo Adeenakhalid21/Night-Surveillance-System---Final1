@@ -199,7 +199,8 @@
      let cameraActive = false;
      let eventSource = null;
     let lastAnomalyEventId = 0;
-    const anomalyPopupCooldownMs = 6000;
+    // Show every incoming SSE alert immediately (no client-side cooldown)
+    const anomalyPopupCooldownMs = 0;
     const anomalyPopupByClass = new Map();
 
      function updateLiveDateTime() {
@@ -339,11 +340,13 @@
 
          const classKey = String(data.class).trim().toLowerCase();
          const now = Date.now();
-         const lastPopupAt = anomalyPopupByClass.get(classKey) || 0;
-         if (now - lastPopupAt < anomalyPopupCooldownMs) {
-           return;
-         }
-         anomalyPopupByClass.set(classKey, now);
+        if (anomalyPopupCooldownMs > 0) {
+          const lastPopupAt = anomalyPopupByClass.get(classKey) || 0;
+          if (now - lastPopupAt < anomalyPopupCooldownMs) {
+            return;
+          }
+          anomalyPopupByClass.set(classKey, now);
+        }
 
          showAnomalyAlert(data.class, data.confidence);
        };

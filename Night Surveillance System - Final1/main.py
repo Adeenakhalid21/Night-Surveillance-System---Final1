@@ -578,12 +578,12 @@ def _parse_label_set(raw_value: str) -> set[str]:
 
 DISABLE_DETECTION_DB = str(os.getenv('DISABLE_DETECTION_DB', '1')).strip().lower() in ('1','true','yes','on')
 IMPORTANT_CLASSES = _parse_label_set(os.getenv('IMPORTANT_CLASSES', 'person,backpack,knife,gun,phone')) or {'person', 'backpack', 'knife', 'gun', 'phone'}
-ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.6'))
+ALERT_CONF_MIN = float(os.getenv('ALERT_CONF_MIN', '0.42'))
 
 # Anomaly detection classes (abnormal behaviors/objects)
 ANOMALY_CLASSES = _parse_label_set(os.getenv('ANOMALY_CLASSES', 'knife,gun,weapon,fire,fight,intruder')) or {'knife', 'gun', 'weapon', 'fire', 'fight', 'intruder'}
 ANOMALY_MATCH_ALL = bool(ANOMALY_CLASSES.intersection({'*', 'all'}))
-ANOMALY_CONF_MIN = float(os.getenv('ANOMALY_CONF_MIN', '0.5'))
+ANOMALY_CONF_MIN = float(os.getenv('ANOMALY_CONF_MIN', '0.4'))
 ANOMALY_MIN_BOX_AREA = int(float(os.getenv('ANOMALY_MIN_BOX_AREA', '1200')))
 ANOMALY_COOLDOWN_SEC = float(os.getenv('ANOMALY_COOLDOWN_SEC', '8'))
 ENABLE_ANOMALY_ALERTS = str(os.getenv('ENABLE_ANOMALY_ALERTS', '1')).strip().lower() in ('1','true','yes','on')
@@ -750,7 +750,10 @@ def _enqueue_anomaly_event(class_name: str, confidence: float, camera_id: int = 
     global anomaly_event_counter
     with anomalies_lock:
         last_seen = anomaly_last_emit.get(normalized, 0.0)
-        if now - last_seen < ANOMALY_COOLDOWN_SEC:
+        # Bypass cooldown for forced emits (e.g., weapon model hits) or
+        # for live camera streams (camera_id == 1) so the surveillance
+        # camera UI receives a popup for every threshold-exceed event.
+        if not force and camera_id != 1 and now - last_seen < ANOMALY_COOLDOWN_SEC:
             return False
 
         anomaly_last_emit[normalized] = now
@@ -905,6 +908,18 @@ def _top_counts(counter: dict, limit: int = UPLOAD_VIDEO_CONTEXT_CLASS_LIMIT) ->
     ]
 
 
+def _top_counts_with_fallback(counter: dict, fallback_label: str, fallback_count: int, limit: int = UPLOAD_VIDEO_CONTEXT_CLASS_LIMIT) -> list[dict]:
+    top_counts = _top_counts(counter, limit=limit)
+    if top_counts:
+        return top_counts
+
+    safe_count = int(max(0, fallback_count))
+    if safe_count <= 0:
+        return []
+
+    return [{'label': str(fallback_label), 'count': safe_count}]
+
+
 def _build_upload_video_context(session_data: dict) -> dict:
     frames_processed = int(session_data.get('frames_processed', 0))
     total_anomalies = int(session_data.get('total_anomalies', 0))
@@ -929,8 +944,16 @@ def _build_upload_video_context(session_data: dict) -> dict:
     return {
         'risk_level': risk_level,
         'anomaly_rate_percent': round(anomaly_rate * 100.0, 2),
-        'top_detected_classes': _top_counts(session_data.get('class_counts', {})),
-        'top_anomaly_classes': _top_counts(session_data.get('anomaly_counts', {})),
+        'top_detected_classes': _top_counts_with_fallback(
+            session_data.get('class_counts', {}),
+            'detections',
+            int(session_data.get('total_detections', 0)),
+        ),
+        'top_anomaly_classes': _top_counts_with_fallback(
+            session_data.get('anomaly_counts', {}),
+            'anomalies',
+            total_anomalies,
+        ),
         'narrative': narrative,
     }
 
@@ -1141,34 +1164,33 @@ def _update_upload_video_session(
                 label = _normalize_label(anomaly.get('class', '')) or 'unknown'
                 anomaly_counts[label] = int(anomaly_counts.get(label, 0)) + 1
 
-        if is_detect_frame:
-            graph = session_data.setdefault('graph', {})
-            labels = graph.setdefault('labels', [])
-            detections_series = graph.setdefault('detections', [])
-            anomalies_series = graph.setdefault('anomalies', [])
-            persons_series = graph.setdefault('persons', [])
-            weapons_series = graph.setdefault('weapons', [])
-            objects_series = graph.setdefault('objects', [])
-            inference_series = graph.setdefault('inference_ms', [])
-            fps_series = graph.setdefault('fps', [])
+        graph = session_data.setdefault('graph', {})
+        labels = graph.setdefault('labels', [])
+        detections_series = graph.setdefault('detections', [])
+        anomalies_series = graph.setdefault('anomalies', [])
+        persons_series = graph.setdefault('persons', [])
+        weapons_series = graph.setdefault('weapons', [])
+        objects_series = graph.setdefault('objects', [])
+        inference_series = graph.setdefault('inference_ms', [])
+        fps_series = graph.setdefault('fps', [])
 
-            labels.append(str(frame_number))
-            detections_series.append(total_count)
-            anomalies_series.append(anomaly_count)
-            persons_series.append(int(metrics.get('person_count', 0)))
-            weapons_series.append(weapon_count)
-            objects_series.append(int(metrics.get('object_count', 0)))
-            inference_series.append(round(inference_ms, 2))
-            fps_series.append(round(stream_fps, 2))
+        labels.append(str(frame_number))
+        detections_series.append(total_count)
+        anomalies_series.append(anomaly_count)
+        persons_series.append(int(metrics.get('person_count', 0)))
+        weapons_series.append(weapon_count)
+        objects_series.append(int(metrics.get('object_count', 0)))
+        inference_series.append(round(inference_ms, 2))
+        fps_series.append(round(stream_fps, 2))
 
-            _trim_graph_series(labels)
-            _trim_graph_series(detections_series)
-            _trim_graph_series(anomalies_series)
-            _trim_graph_series(persons_series)
-            _trim_graph_series(weapons_series)
-            _trim_graph_series(objects_series)
-            _trim_graph_series(inference_series)
-            _trim_graph_series(fps_series)
+        _trim_graph_series(labels)
+        _trim_graph_series(detections_series)
+        _trim_graph_series(anomalies_series)
+        _trim_graph_series(persons_series)
+        _trim_graph_series(weapons_series)
+        _trim_graph_series(objects_series)
+        _trim_graph_series(inference_series)
+        _trim_graph_series(fps_series)
 
         session_data['updated_at'] = time.time()
 
@@ -1265,8 +1287,18 @@ def _save_upload_video_summary_db(video_id: str) -> None:
             session_data.get('lowlight_video_mode', session_data.get('video_enhance', False))
         ),
         'video_enhance': bool(session_data.get('video_enhance', False)),
-        'top_detected_classes': _top_counts(session_data.get('class_counts', {}), limit=6),
-        'top_anomaly_classes': _top_counts(session_data.get('anomaly_counts', {}), limit=6),
+        'top_detected_classes': _top_counts_with_fallback(
+            session_data.get('class_counts', {}),
+            'detections',
+            total_detections,
+            limit=6,
+        ),
+        'top_anomaly_classes': _top_counts_with_fallback(
+            session_data.get('anomaly_counts', {}),
+            'anomalies',
+            total_anomalies,
+            limit=6,
+        ),
     }
 
     try:
