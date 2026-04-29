@@ -648,7 +648,8 @@ VIDEO_DETECT_EVERY = max(1, int(float(os.getenv('VIDEO_DETECT_EVERY', '5'))))
 VIDEO_ENHANCE = str(os.getenv('VIDEO_ENHANCE', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 # Night Shield fix: Per-upload low-light mode defaults on so enhanced detection is available without extra setup.
 UPLOAD_LOWLIGHT_MODE_DEFAULT = str(os.getenv('UPLOAD_LOWLIGHT_MODE_DEFAULT', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
-UPLOAD_VIDEO_REALTIME_PLAYBACK = str(os.getenv('UPLOAD_VIDEO_REALTIME_PLAYBACK', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+# Uploaded videos should default to real-time pacing so inference is not starved by ultra-fast playback.
+UPLOAD_VIDEO_REALTIME_PLAYBACK = str(os.getenv('UPLOAD_VIDEO_REALTIME_PLAYBACK', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
 UPLOAD_VIDEO_FAST_ENHANCE = str(os.getenv('UPLOAD_VIDEO_FAST_ENHANCE', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
 UPLOAD_SUMMARY_POLL_SECONDS = max(1.5, float(os.getenv('UPLOAD_SUMMARY_POLL_SECONDS', '2')))
 UPLOAD_STATS_POLL_SECONDS = max(1.0, float(os.getenv('UPLOAD_STATS_POLL_SECONDS', '2.5')))
@@ -925,6 +926,23 @@ def _build_upload_video_context(session_data: dict) -> dict:
     total_anomalies = int(session_data.get('total_anomalies', 0))
     anomaly_rate = (total_anomalies / frames_processed) if frames_processed else 0.0
 
+    class_counts = dict(session_data.get('class_counts', {}) or {})
+    if not class_counts:
+        grouped = dict(session_data.get('group_counts', {}) or {})
+        for label in ('person', 'weapon', 'object'):
+            count = int(grouped.get(label, 0) or 0)
+            if count > 0:
+                class_counts[label] = count
+
+    if not class_counts:
+        graph = dict(session_data.get('graph', {}) or {})
+        for label, series_key in (('person', 'persons'), ('weapon', 'weapons'), ('object', 'objects')):
+            series = graph.get(series_key, [])
+            if isinstance(series, list) and series:
+                count = int(sum(max(0, int(v or 0)) for v in series))
+                if count > 0:
+                    class_counts[label] = count
+
     if total_anomalies >= 20 or anomaly_rate >= 0.35:
         risk_level = 'high'
     elif total_anomalies >= 8 or anomaly_rate >= 0.15:
@@ -945,7 +963,7 @@ def _build_upload_video_context(session_data: dict) -> dict:
         'risk_level': risk_level,
         'anomaly_rate_percent': round(anomaly_rate * 100.0, 2),
         'top_detected_classes': _top_counts_with_fallback(
-            session_data.get('class_counts', {}),
+            class_counts,
             'detections',
             int(session_data.get('total_detections', 0)),
         ),
@@ -1005,6 +1023,12 @@ def _register_upload_video_session(
             'max_confidence': 0.0,
             'class_counts': {},
             'anomaly_counts': {},
+            'group_counts': {
+                'person': 0,
+                'weapon': 0,
+                'object': 0,
+            },
+            'counted_detection_sources': [],
             'graph': {
                 'labels': [],
                 'detections': [],
@@ -1039,6 +1063,12 @@ def _reset_upload_video_session_metrics(session_data: dict) -> None:
     session_data['max_confidence'] = 0.0
     session_data['class_counts'] = {}
     session_data['anomaly_counts'] = {}
+    session_data['group_counts'] = {
+        'person': 0,
+        'weapon': 0,
+        'object': 0,
+    }
+    session_data['counted_detection_sources'] = []
     session_data['graph'] = {
         'labels': [],
         'detections': [],
@@ -1131,32 +1161,63 @@ def _update_upload_video_session(
         inference_ms = float(metrics.get('inference_ms', 0.0))
         stream_fps = float(metrics.get('fps', 0.0))
         is_detect_frame = bool(metrics.get('is_detect_frame', True))
+        detect_source_seq_raw = metrics.get('detect_source_seq')
+        try:
+            detect_source_seq = int(detect_source_seq_raw)
+        except Exception:
+            detect_source_seq = frame_number if is_detect_frame else 0
 
         if total_frames > 0:
             session_data['progress_percent'] = round(min(100.0, (frames_processed / total_frames) * 100.0), 2)
         else:
             session_data['progress_percent'] = 0.0
 
-        if is_detect_frame:
+        should_accumulate_detection = is_detect_frame
+        if detect_source_seq > 0:
+            counted_sources = session_data.setdefault('counted_detection_sources', [])
+            if detect_source_seq in counted_sources:
+                should_accumulate_detection = False
+            else:
+                counted_sources.append(detect_source_seq)
+                if len(counted_sources) > 10000:
+                    del counted_sources[:-5000]
+                should_accumulate_detection = True
+
+        if should_accumulate_detection:
             session_data['detection_frames_processed'] = int(session_data.get('detection_frames_processed', 0)) + 1
             session_data['total_detections'] = int(session_data.get('total_detections', 0)) + total_count
             session_data['total_anomalies'] = int(session_data.get('total_anomalies', 0)) + anomaly_count
             session_data['weapon_detections_total'] = int(session_data.get('weapon_detections_total', 0)) + max(0, weapon_count)
 
+            group_counts = session_data.setdefault('group_counts', {'person': 0, 'weapon': 0, 'object': 0})
+            group_counts['person'] = int(group_counts.get('person', 0)) + int(metrics.get('person_count', 0) or 0)
+            group_counts['weapon'] = int(group_counts.get('weapon', 0)) + max(0, weapon_count)
+            group_counts['object'] = int(group_counts.get('object', 0)) + int(metrics.get('object_count', 0) or 0)
+
         session_data['peak_detections'] = max(int(session_data.get('peak_detections', 0)), total_count)
         session_data['peak_anomalies'] = max(int(session_data.get('peak_anomalies', 0)), anomaly_count)
         session_data['sum_fps'] = float(session_data.get('sum_fps', 0.0)) + stream_fps
         session_data['latest_fps'] = max(0.0, stream_fps)
-        if is_detect_frame:
+        if should_accumulate_detection:
             session_data['sum_inference_ms'] = float(session_data.get('sum_inference_ms', 0.0)) + inference_ms
 
         max_conf = max([float(det.get('confidence', 0.0)) for det in tracked_detections] + [0.0])
         session_data['max_confidence'] = max(float(session_data.get('max_confidence', 0.0)), max_conf)
 
-        if is_detect_frame:
+        if should_accumulate_detection:
             class_counts = session_data.setdefault('class_counts', {})
             for det in tracked_detections:
-                label = _normalize_label(det.get('class', '')) or 'unknown'
+                # Be permissive: detections may include 'class', 'label', or 'class_key'
+                raw_label = None
+                if isinstance(det, dict):
+                    raw_label = det.get('class') or det.get('label') or det.get('class_key')
+                else:
+                    try:
+                        raw_label = getattr(det, 'class', None) or getattr(det, 'label', None) or getattr(det, 'class_key', None)
+                    except Exception:
+                        raw_label = None
+
+                label = _normalize_label(raw_label or '') or 'unknown'
                 class_counts[label] = int(class_counts.get(label, 0)) + 1
 
             anomaly_counts = session_data.setdefault('anomaly_counts', {})
@@ -2942,7 +3003,13 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
             should_run_detection = True
             if is_upload_video:
-                should_run_detection = (int(source_seq) == 1) or (int(source_seq) % int(detect_every) == 0)
+                # Use frame-gap cadence instead of modulo to tolerate dropped frames when queues overwrite old items.
+                source_seq_i = int(source_seq)
+                should_run_detection = (
+                    source_seq_i == 1
+                    or last_detect_seq <= 0
+                    or (source_seq_i - int(last_detect_seq)) >= int(detect_every)
+                )
 
             if (not is_upload_video) and ((now - last_detection_ts) < DETECTION_MIN_INTERVAL_SEC):
                 tracked_detections = tracker.get_active_tracks(now=now)
@@ -3020,14 +3087,15 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
 
             emitted_anomalies = []
             for anomaly in anomalies:
-                # Night Shield fix: Only emit real-time alerts for high-tier weapon anomalies.
+                # Night Shield fix: Let live surveillance camera anomalies create UI alerts.
                 is_weapon_anomaly = bool(anomaly.get('weapon_model_hit')) or _lane_name_for_class(anomaly.get('class', '')) == 'weapon'
-                if is_weapon_anomaly and str(anomaly.get('weapon_tier', 'low')).strip().lower() != 'high':
+                if is_upload_video and is_weapon_anomaly and str(anomaly.get('weapon_tier', 'low')).strip().lower() != 'high':
                     continue
 
                 if _enqueue_anomaly_event(
                     anomaly['class'],
                     anomaly['confidence'],
+                    camera_id=1,
                     force=bool(anomaly.get('weapon_model_hit')),
                 ):
                     emitted_anomalies.append(anomaly)
@@ -3182,6 +3250,7 @@ def video_stream(source, stop_event, upload_video_id: str | None = None):
                         'inference_ms': inference_ms,
                         'fps': stream_fps,
                         'is_detect_frame': bool(is_detect_frame),
+                        'detect_source_seq': int(detection_meta.get('detect_source_seq', 0) or 0),
                     },
                     tracked_detections,
                     rendered_anomalies,
@@ -4454,6 +4523,50 @@ def anomaly_alerts():
         },
     )
 
+
+@app.route('/acknowledge_anomaly', methods=['POST'])
+def acknowledge_anomaly():
+    """Receive client acknowledgement for an anomaly and log it."""
+    if 'loggedin' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        anomaly_id = int(payload.get('id', 0) or 0)
+    except Exception:
+        anomaly_id = 0
+    class_name = str(payload.get('class') or '').strip()
+
+    # Mark in-memory anomaly as acknowledged (best-effort)
+    try:
+        with anomalies_lock:
+            for a in recent_anomalies:
+                if int(a.get('id', 0)) == anomaly_id:
+                    a['acknowledged'] = True
+                    a['acknowledged_at'] = time.time()
+                    a['acknowledged_by'] = session.get('email') or session.get('firstname') or 'user'
+                    break
+    except Exception:
+        pass
+
+    # Log the acknowledgement as a surveillance event
+    try:
+        log_surveillance_event_db({
+            'camera_id': 1,
+            'event_type': 'anomaly_acknowledged',
+            'severity': 'low',
+            'description': f'Anomaly acknowledged: {class_name or anomaly_id}',
+            'details': {
+                'anomaly_id': anomaly_id,
+                'class': class_name,
+                'acknowledged_by': session.get('email') or session.get('firstname') or 'user',
+            },
+        })
+    except Exception:
+        pass
+
+    return jsonify({'status': 'ok'}), 200
+
 # Dataset Management Routes
 @app.route('/datasets')
 def datasets():
@@ -4858,6 +4971,109 @@ def _wrap_draw_text(draw, text: str, font, max_width: int) -> list[str]:
     return lines or ['']
 
 
+def _humanize_report_key(key: str) -> str:
+    normalized = str(key or '').strip().replace('_', ' ')
+    normalized = ' '.join(normalized.split())
+    if not normalized:
+        return 'Field'
+    return normalized.title()
+
+
+def _extract_report_event_summary(event: dict) -> tuple[str, list[str]]:
+    """Return a concise headline + bullet highlights for PDF event cards."""
+    description_text = str(event.get('description_text') or '').strip()
+    event_type = str(event.get('event_type') or 'event').strip().lower()
+    if not description_text:
+        return (f"{event_type or 'event'}", [])
+
+    raw_lines = [line.strip() for line in description_text.splitlines() if str(line).strip()]
+    if not raw_lines:
+        return (f"{event_type or 'event'}", [])
+
+    # Prefer a plain sentence headline (line without key:value shape).
+    headline = ''
+    for line in raw_lines:
+        if ':' not in line:
+            headline = line
+            break
+    if not headline:
+        headline = raw_lines[0]
+
+    kv_pairs: list[tuple[str, str]] = []
+    top_classes: list[tuple[str, str]] = []
+    pending_top_label = ''
+    in_top_classes = False
+
+    for line in raw_lines:
+        if line.lower().startswith('top_detected_classes:'):
+            in_top_classes = True
+            continue
+        if in_top_classes and line.lower().startswith('top_anomaly_classes:'):
+            in_top_classes = False
+
+        if ':' not in line:
+            continue
+
+        key, value = line.split(':', 1)
+        key = str(key).strip().lower()
+        value = str(value).strip()
+
+        # Parse flattened list blocks used in summary payload text.
+        if in_top_classes:
+            if key == 'label':
+                pending_top_label = value
+                continue
+            if key == 'count' and pending_top_label:
+                top_classes.append((pending_top_label, value))
+                pending_top_label = ''
+                continue
+
+        if not value:
+            continue
+        kv_pairs.append((key, value))
+
+    highlights: list[str] = []
+    preferred_keys = [
+        'video_filename', 'status', 'frame_size', 'total_frames_expected', 'frames_processed',
+        'total_detections', 'total_anomalies', 'peak_detections', 'peak_anomalies',
+        'avg_detections_per_frame', 'avg_inference_ms', 'avg_fps', 'max_confidence',
+        'weapon_detections', 'duration_sec', 'elapsed_sec', 'detect_every',
+        'class', 'confidence', 'camera_id', 'source',
+    ]
+    ignored_keys = {
+        'details', 'stats', 'video_id', 'session_created_at', 'session_started_at',
+        'session_completed_at', 'eta_sec', 'video_path', 'image_path', 'detected_at',
+        'lowlight_video_mode', 'video_enhance',
+    }
+
+    kv_map = {k: v for k, v in kv_pairs if k not in ignored_keys}
+    for key in preferred_keys:
+        if key in kv_map:
+            highlights.append(f"{_humanize_report_key(key)}: {kv_map[key]}")
+
+    # Add a few extra fields when preferred set is sparse.
+    if len(highlights) < 4:
+        for key, value in kv_pairs:
+            if key in ignored_keys:
+                continue
+            rendered = f"{_humanize_report_key(key)}: {value}"
+            if rendered not in highlights:
+                highlights.append(rendered)
+            if len(highlights) >= 8:
+                break
+
+    if top_classes:
+        compact = ', '.join(f"{label} ({count})" for label, count in top_classes[:4])
+        if compact:
+            highlights.append(f"Top Classes: {compact}")
+
+    # Keep cards concise and readable.
+    if len(highlights) > 10:
+        highlights = highlights[:10]
+
+    return (headline, highlights)
+
+
 def _build_surveillance_report_pdf(report_title: str, events: list[dict], stats: dict) -> bytes:
     page_size = (1240, 1754)
     margin = 72
@@ -5013,17 +5229,36 @@ def _build_surveillance_report_pdf(report_title: str, events: list[dict], stats:
             image_path = str(event.get('image_path') or '').strip()
             video_path = str(event.get('video_path') or '').strip()
 
+            summary_headline, summary_highlights = _extract_report_event_summary(event)
+
             severity_fill = {'high': danger, 'medium': warning, 'low': success}.get(severity, accent)
             severity_bg = {'high': '#fef2f2', 'medium': '#fffbeb', 'low': '#ecfdf5'}.get(severity, accent_soft)
 
-            desc_lines = _wrap_draw_text(draw, description_text or 'No description available.', small_font, page_size[0] - (margin * 2) - 64)
             meta_lines = [f'Time: {timestamp}', f'Type: {event_type}', f'Camera: {camera_name}']
             if image_path:
                 meta_lines.append(f'Image: {image_path}')
             if video_path:
                 meta_lines.append(f'Video: {video_path}')
 
-            block_height = 24 + (len(meta_lines) * 18) + 16 + card_height(desc_lines, small_font, padding_y=0, line_gap=5)
+            meta_wrapped: list[str] = []
+            for item in meta_lines:
+                meta_wrapped.extend(_wrap_draw_text(draw, item, tiny_font, page_size[0] - (margin * 2) - 64))
+
+            summary_lines = _wrap_draw_text(draw, summary_headline or (description_text or 'No description available.'), body_font, page_size[0] - (margin * 2) - 64)
+
+            detail_lines: list[str] = []
+            for bullet in summary_highlights:
+                wrapped = _wrap_draw_text(draw, f"- {bullet}", small_font, page_size[0] - (margin * 2) - 84)
+                detail_lines.extend(wrapped)
+
+            block_height = (
+                24
+                + (len(meta_wrapped) * 16)
+                + 16
+                + card_height(summary_lines, body_font, padding_y=0, line_gap=5)
+                + 8
+                + card_height(detail_lines, small_font, padding_y=0, line_gap=4)
+            )
             if current_y + block_height > page_size[1] - 100:
                 start_new_page()
                 current_y = margin
@@ -5036,14 +5271,20 @@ def _build_surveillance_report_pdf(report_title: str, events: list[dict], stats:
             draw.text((margin + 138, current_y + 21), f'#{event_index + 1}', fill=muted, font=body_font)
 
             meta_y = current_y + 56
-            for meta_line in meta_lines:
+            for meta_line in meta_wrapped:
                 draw.text((margin + 24, meta_y), meta_line, fill=muted, font=tiny_font)
-                meta_y += 18
+                meta_y += 16
 
             desc_y = meta_y + 8
-            draw.text((margin + 24, desc_y), 'Description', fill=title_color, font=body_font)
+            draw.text((margin + 24, desc_y), 'Summary', fill=title_color, font=body_font)
             desc_y += 24
-            desc_y = draw_text_block(margin + 24, desc_y, desc_lines, small_font, fill=title_color, line_gap=5)
+            desc_y = draw_text_block(margin + 24, desc_y, summary_lines, body_font, fill=title_color, line_gap=5)
+
+            if detail_lines:
+                desc_y += 8
+                draw.text((margin + 24, desc_y), 'Highlights', fill=muted, font=tiny_font)
+                desc_y += 18
+                desc_y = draw_text_block(margin + 34, desc_y, detail_lines, small_font, fill=title_color, line_gap=4)
 
             current_y += block_height + 16
             event_index += 1

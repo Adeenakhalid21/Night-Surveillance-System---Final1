@@ -56,6 +56,14 @@
       display: inline-block;
       width: 100%;
     }
+    /* Anomaly alert UI */
+    #alert-container { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); z-index: 9999; }
+    .anomaly-alert { display: flex; gap: 0.75rem; align-items: center; background: rgba(36,36,40,0.95); color: #fff; padding: 0.8rem 1rem; border-radius: 0.6rem; box-shadow: 0 6px 18px rgba(10,10,10,0.4); margin-top: 0.6rem; opacity: 0; transform: translateY(-10px); transition: all 0.25s ease; min-width: 320px; max-width: 720px; }
+    .anomaly-alert.show { opacity: 1; transform: translateY(0); }
+    .anomaly-alert .alert-icon { font-size: 1.6rem; color: #ffd24d; }
+    .anomaly-alert .alert-content { flex: 1; }
+    .alert-actions { display: flex; gap: 0.5rem; }
+    .alert-ok-btn { background: #2ecc71; color: #062017; border: none; padding: 0.35rem 0.65rem; border-radius: 0.4rem; cursor: pointer; font-weight: 700; }
     .stream-fps-badge {
       position: absolute;
       top: 0.7rem;
@@ -384,12 +392,28 @@
          alert.classList.add('show');
        }, 10);
        
-       // Remove after 5 seconds
-       setTimeout(() => {
+       // Add acknowledge (OK) button and remove after 5 seconds if not acknowledged
+       const actions = document.createElement('div');
+       actions.className = 'alert-actions';
+       const okBtn = document.createElement('button');
+       okBtn.className = 'alert-ok-btn';
+       okBtn.textContent = 'OK';
+       okBtn.addEventListener('click', () => {
+         acknowledgeAnomaly(lastAnomalyEventId, className);
          alert.classList.remove('show');
-         setTimeout(() => {
-           alert.remove();
-         }, 300);
+         setTimeout(() => alert.remove(), 300);
+       });
+       actions.appendChild(okBtn);
+       alert.appendChild(actions);
+
+       // Auto-remove after 5 seconds if still present
+       setTimeout(() => {
+         if (document.body.contains(alert)) {
+           alert.classList.remove('show');
+           setTimeout(() => {
+             if (document.body.contains(alert)) alert.remove();
+           }, 300);
+         }
        }, 5000);
      }
      
@@ -415,6 +439,38 @@
          console.log('Audio not supported');
        }
      }
+
+    // Acknowledge anomaly: notify server and optionally show native desktop notification
+    async function acknowledgeAnomaly(eventId, className) {
+      try {
+        await fetch('{{ url_for("acknowledge_anomaly") }}', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: Number(eventId || 0), class: String(className || '') }),
+          cache: 'no-store',
+        });
+      } catch (err) {
+        console.warn('Failed to acknowledge anomaly:', err);
+      }
+
+      // Try to show a native desktop notification (user may need to allow it)
+      try {
+        if (window.Notification && Notification.permission !== 'denied') {
+          if (Notification.permission !== 'granted') {
+            await Notification.requestPermission();
+          }
+          if (Notification.permission === 'granted') {
+            const n = new Notification('Anomaly acknowledged', {
+              body: `${className} acknowledged`,
+              icon: '{{ url_for("static", filename="images/alert.png") }}' || undefined,
+            });
+            n.onclick = () => window.focus();
+          }
+        }
+      } catch (err) {
+        // ignore desktop notification errors
+      }
+    }
    </script>
 </body>
 </html>

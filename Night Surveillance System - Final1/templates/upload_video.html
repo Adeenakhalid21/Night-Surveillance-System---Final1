@@ -942,13 +942,8 @@
         }
       }
 
-      if (finalized) {
-        renderCountList('top-classes-list', context.top_detected_classes, 'No detections');
-        renderCountList('top-anomaly-list', context.top_anomaly_classes, 'No anomalies');
-      } else {
-        renderCountList('top-classes-list', [], 'Processing');
-        renderCountList('top-anomaly-list', [], 'Processing');
-      }
+      renderCountList('top-classes-list', context.top_detected_classes, finalized ? 'No detections' : 'Processing');
+      renderCountList('top-anomaly-list', context.top_anomaly_classes, finalized ? 'No anomalies' : 'Processing');
 
       latestGraphSnapshot = payload.graph || {};
       scheduleChartDraw();
